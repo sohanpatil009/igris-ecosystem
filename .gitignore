@@ -1,0 +1,13 @@
+/target/
+**/*.rs.bk
+Cargo.lock
+.DS_Store
+*.exe
+*.exe.manifest
+*.rc
+*.o
+*.d
+pkg/
+node_modules/
+.vscode/
+*.zwc
