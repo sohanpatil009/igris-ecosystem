@@ -395,14 +395,9 @@ async fn scan_for_devices(
     is_scanning.set(true);
     status_message.set("Scanning network for devices...".to_string());
     
-    // Get local IP
-    let local_ip = local_ip_address::local_ip()
-        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 100)))
-        .to_string();
-    
-    // Create discovery service and scan
+    // Create discovery service and scan (all local interfaces' subnets)
     let discovery = crate::fastswap::network::DiscoveryService::new();
-    match discovery.scan_network(&local_ip).await {
+    match discovery.scan_all_networks().await {
         Ok(found_devices) => {
             devices.set(found_devices.clone());
             status_message.set(format!("Found {} device(s)", found_devices.len()));

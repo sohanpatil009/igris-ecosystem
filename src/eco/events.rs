@@ -1,6 +1,7 @@
 use crate::eco::clipboard::ClipboardData;
 use crate::eco::device::EcoDevice;
 use crate::eco::notification::{NotificationData, NotificationReply};
+use crate::eco::protocol::{NotificationActionPayload, NotificationDismissPayload};
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -17,6 +18,10 @@ pub enum EcoEvent {
 
     NotificationReceived(NotificationData, String),
     NotificationReplied(NotificationReply),
+    /// A peer dismissed one of our notifications (or a local dismiss event).
+    NotificationDismissed(NotificationDismissPayload),
+    /// A peer wants us to fire one of the notification's action buttons.
+    NotificationActionRequested(NotificationActionPayload),
 
     PairingRequest(Arc<EcoDevice>),
     PairingAccepted(Arc<EcoDevice>),
@@ -44,7 +49,10 @@ impl EventBus {
     }
 
     pub fn emit(&self, event: EcoEvent) {
-        let handlers = self.handlers.lock().unwrap();
+        // Clone under lock, then invoke outside it: handlers may emit
+        // nested events (e.g. receive_remote re-emitting NotificationReceived),
+        // which would otherwise deadlock on the non-reentrant mutex.
+        let handlers = self.handlers.lock().unwrap().clone();
         for handler in handlers.iter() {
             handler(event.clone());
         }

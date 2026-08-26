@@ -61,6 +61,9 @@ pub struct TransferState {
     pub transferred: u64,
     pub status: TransferStatus,
     pub confirmed: bool,
+    /// When the session was created — used to reap sessions whose sender
+    /// never completed (or even started) the confirm handshake.
+    pub created_at: std::time::Instant,
 }
 
 #[derive(Debug, Clone)]

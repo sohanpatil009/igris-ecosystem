@@ -135,6 +135,12 @@ pub fn NotificationPanel(primary_color: String, accent_rgb: String) -> Element {
 
                         // Header: device name + app name + time
                         div { style: "display: flex; align-items: center; gap: 8px; margin-bottom: 8px;",
+                            if let Some(icon) = &notif.icon {
+                                img {
+                                    src: format!("data:image/png;base64,{}", icon),
+                                    style: "width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0;",
+                                }
+                            }
                             span { style: format!("padding: 2px 8px; border-radius: 4px; font-size: 9px; letter-spacing: 1px; background: rgba({}, 0.12); color: {}; font-family: monospace; border: 1px solid rgba({}, 0.2);",
                                 accent_rgb, primary_color, accent_rgb),
                                 "{notif.device_name}"
@@ -168,6 +174,48 @@ pub fn NotificationPanel(primary_color: String, accent_rgb: String) -> Element {
                         // Body
                         div { style: "font-size: 12px; color: rgba(255,255,255,0.5); font-family: monospace; margin-bottom: 12px; line-height: 1.5;",
                             "{notif.body}"
+                        }
+
+                        // Conversation thread (MessagingStyle)
+                        if !notif.messages.is_empty() {
+                            div { style: "display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px;",
+                                for msg in notif.messages.iter() {
+                                    div { style: "font-size: 11px; font-family: monospace; line-height: 1.4;",
+                                        span { style: "color: rgba(255,255,255,0.35);",
+                                            "{msg.sender}: "
+                                        }
+                                        span { style: "color: rgba(255,255,255,0.7);",
+                                            "{msg.text}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Action buttons (route back to the phone)
+                        if !notif.actions.is_empty() {
+                            div { style: "display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;",
+                                for (idx, action) in notif.actions.iter().enumerate() {
+                                    button {
+                                        class: "np-reply-btn",
+                                        onclick: {
+                                            let notif_id = notif.id.clone();
+                                            let action_index = idx as u32;
+                                            move |_| {
+                                                let notif_id = notif_id.clone();
+                                                spawn(async move {
+                                                    if let Ok(mut guard) = crate::eco::manager::ECO_MANAGER.lock() {
+                                                        if let Some(ref mut manager) = *guard {
+                                                            let _ = manager.fire_notification_action(&notif_id, action_index).await;
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        },
+                                        "{action}"
+                                    }
+                                }
+                            }
                         }
 
                         // Reply input

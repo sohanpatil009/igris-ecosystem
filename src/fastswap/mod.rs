@@ -26,7 +26,18 @@ pub struct PendingTransfer {
     pub file_count: usize,
     pub total_size: u64,
     pub files: Vec<String>,
+    /// When this entry was created — stale entries (confirm-upload never
+    /// arrived) are pruned after `PENDING_TTL`.
+    pub created_at: std::time::Instant,
+    /// True once the sender's `confirm-upload` request is blocked waiting for
+    /// our decision. Only awaiting transfers are shown in the accept popup,
+    /// so accepting can never target the wrong (stale) session.
+    pub awaiting_approval: bool,
 }
+
+/// A pending transfer whose `confirm-upload` never arrives is dead; this TTL
+/// is well above the 60 s approval window the handler waits before timing out.
+const PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(120);
 
 static PENDING_TRANSFERS: once_cell::sync::Lazy<Arc<RwLock<Vec<PendingTransfer>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(Vec::new())));
@@ -159,6 +170,17 @@ pub fn is_fastswap_running() -> bool {
     false
 }
 
+/// Get the FastSwap TLS port if running, otherwise return default (53318).
+pub fn get_fastswap_tls_port() -> u16 {
+    if let Ok(guard) = FASTSWAP_MANAGER.lock() {
+        if let Some(manager) = guard.as_ref() {
+            let http_port = manager.port;
+            return if http_port == 53317 { 53318 } else { http_port + 1 };
+        }
+    }
+    53318
+}
+
 /// Start the FastSwap server if it has not already been started.
 /// Safe to call multiple times — subsequent calls are no-ops.
 pub async fn start_on_demand() {
@@ -213,12 +235,32 @@ pub fn get_progress_tracker() -> ProgressTracker {
 /// Add pending transfer for approval
 pub async fn add_pending_transfer(transfer: PendingTransfer) {
     let mut pending = PENDING_TRANSFERS.write().await;
+    prune_stale_locked(&mut pending);
     pending.push(transfer);
 }
 
-/// Get all pending transfers
+/// Prune pending entries whose sender never confirmed. Awaiting entries are
+/// never pruned — they are removed by approve/deny (or the handler's own
+/// 60 s timeout).
+fn prune_stale_locked(pending: &mut Vec<PendingTransfer>) {
+    let now = std::time::Instant::now();
+    pending.retain(|t| t.awaiting_approval || now.duration_since(t.created_at) < PENDING_TTL);
+}
+
+/// Mark the transfer as actively awaiting approval (sender's confirm-upload
+/// is blocked on our decision). Called by the server's confirm handler.
+pub async fn mark_awaiting(session_id: &str) {
+    let mut pending = PENDING_TRANSFERS.write().await;
+    if let Some(t) = pending.iter_mut().find(|t| t.session_id == session_id) {
+        t.awaiting_approval = true;
+    }
+}
+
+/// Get all pending transfers (pruning stale entries first)
 pub async fn get_pending_transfers() -> Vec<PendingTransfer> {
-    PENDING_TRANSFERS.read().await.clone()
+    let mut pending = PENDING_TRANSFERS.write().await;
+    prune_stale_locked(&mut pending);
+    pending.clone()
 }
 
 /// Approve a transfer
@@ -251,6 +293,14 @@ pub async fn deny_transfer(session_id: &str) {
 pub async fn is_transfer_approved(session_id: &str) -> bool {
     let approved = APPROVED_SESSIONS.read().await;
     approved.contains(&session_id.to_string())
+}
+
+/// Drop the approval marker once the confirm handshake has consumed it.
+pub async fn clear_approved(session_id: &str) {
+    APPROVED_SESSIONS
+        .write()
+        .await
+        .retain(|s| s != session_id);
 }
 
 impl Drop for FastSwapManager {
@@ -334,6 +384,8 @@ mod tests {
             file_count: 2,
             total_size: 1024,
             files: vec!["a.txt".into(), "b.txt".into()],
+            created_at: std::time::Instant::now(),
+            awaiting_approval: false,
         };
         add_pending_transfer(pending).await;
 
@@ -343,6 +395,86 @@ mod tests {
         assert!(
             !pending_list.iter().any(|t| t.session_id == session_id),
             "approved transfer should be removed from pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stale_pending_is_pruned() {
+        let session_id = "test-session-stale";
+        let mut pending = PendingTransfer {
+            session_id: session_id.to_string(),
+            sender_name: "Ghost".into(),
+            sender_device: "GhostDevice".into(),
+            file_count: 1,
+            total_size: 42,
+            files: vec!["ghost.txt".into()],
+            created_at: std::time::Instant::now(),
+            awaiting_approval: false,
+        };
+        // Simulate the sender's confirm-upload never arriving
+        pending.created_at =
+            std::time::Instant::now() - std::time::Duration::from_secs(PENDING_TTL.as_secs() + 1);
+        add_pending_transfer(pending).await;
+
+        let pending_list = get_pending_transfers().await;
+        assert!(
+            pending_list.iter().all(|t| t.session_id != session_id),
+            "stale (never-confirmed) pending transfer should be pruned"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_awaiting_pending_never_pruned() {
+        let session_id = "test-session-awaiting";
+        let mut pending = PendingTransfer {
+            session_id: session_id.to_string(),
+            sender_name: "Sender".into(),
+            sender_device: "SenderDevice".into(),
+            file_count: 1,
+            total_size: 42,
+            files: vec!["a.txt".into()],
+            created_at: std::time::Instant::now(),
+            awaiting_approval: false,
+        };
+        add_pending_transfer(pending).await;
+        mark_awaiting(session_id).await;
+
+        // Age it past the TTL — awaiting entries must survive until
+        // approve/deny removes them.
+        let mut pending_list = get_pending_transfers().await;
+        let entry = pending_list
+            .iter_mut()
+            .find(|t| t.session_id == session_id)
+            .expect("awaiting transfer should still be listed");
+        entry.created_at =
+            std::time::Instant::now() - std::time::Duration::from_secs(PENDING_TTL.as_secs() + 1);
+
+        let pending_list = get_pending_transfers().await;
+        assert!(
+            pending_list.iter().any(|t| t.session_id == session_id && t.awaiting_approval),
+            "awaiting transfer must not be pruned while the user is deciding"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_approval_before_confirm_is_visible() {
+        // User clicks Accept before the sender's confirm-upload arrives:
+        // approval must be recorded even though no waiter exists yet...
+        let session_id = "test-session-early-accept";
+        approve_transfer(session_id).await;
+
+        // ...and the confirm handler's early re-check must see it.
+        assert!(
+            is_transfer_approved(session_id).await,
+            "approval must survive until the confirm handler consumes it"
+        );
+
+        register_approval_watch(session_id).await;
+
+        clear_approved(session_id).await;
+        assert!(
+            !is_transfer_approved(session_id).await,
+            "approval marker should be cleared after the confirm handshake"
         );
     }
 }

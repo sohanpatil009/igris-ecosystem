@@ -12,6 +12,7 @@ pub enum LlmProvider {
     Openai,
     Groq,
     Google,
+    Openrouter,
 }
 
 impl LlmProvider {
@@ -21,6 +22,7 @@ impl LlmProvider {
             Self::Openai => "OpenAI",
             Self::Groq => "Groq",
             Self::Google => "Google Gemini",
+            Self::Openrouter => "OpenRouter",
         }
     }
 
@@ -30,6 +32,7 @@ impl LlmProvider {
             Self::Openai => "openai",
             Self::Groq => "groq",
             Self::Google => "google",
+            Self::Openrouter => "openrouter",
         }
     }
 
@@ -39,6 +42,7 @@ impl LlmProvider {
             Self::Openai => "https://api.openai.com/v1",
             Self::Groq => "https://api.groq.com/openai/v1",
             Self::Google => "https://generativelanguage.googleapis.com/v1beta",
+            Self::Openrouter => "https://openrouter.ai/api/v1",
         }
     }
 
@@ -48,6 +52,7 @@ impl LlmProvider {
             Self::Openai => "OPENAI_API_KEY",
             Self::Groq => "GROQ_API_KEY",
             Self::Google => "GOOGLE_API_KEY",
+            Self::Openrouter => "OPENROUTER_API_KEY",
         }
     }
 
@@ -57,13 +62,14 @@ impl LlmProvider {
             "openai" => Self::Openai,
             "groq" => Self::Groq,
             "google" => Self::Google,
+            "openrouter" => Self::Openrouter,
             _ => Self::Nvidia,
         }
     }
 
     /// All providers as a slice.
     pub fn all() -> &'static [Self] {
-        &[Self::Nvidia, Self::Openai, Self::Groq, Self::Google]
+        &[Self::Nvidia, Self::Openai, Self::Groq, Self::Google, Self::Openrouter]
     }
 }
 
@@ -90,6 +96,8 @@ pub const AVAILABLE_MODELS: &[(&str, &str)] = &[
     ("llama-3.1-8b-instant",                    "Llama 3.1 8B (Groq)"),
     ("mixtral-8x7b-32768",                      "Mixtral 8x7B (Groq)"),
     ("gemma2-9b-it",                            "Gemma 2 9B (Groq)"),
+    // OpenRouter
+    ("z-ai/glm-5.2:free",                       "GLM 5.2 Free (OpenRouter)"),
 ];
 
 /// Model used for fast tool routing and intent classification.

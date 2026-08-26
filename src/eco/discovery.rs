@@ -1,7 +1,10 @@
 use crate::eco::constants::*;
 use crate::eco::device::EcoDevice;
 use crate::eco::events::{EcoEvent, EventBus};
-use crate::eco::protocol::{ClipboardSyncPayload, NotificationSyncPayload, NotificationReplyPayload};
+use crate::eco::protocol::{
+    ClipboardSyncPayload, NotificationActionPayload, NotificationDismissPayload,
+    NotificationSyncPayload, NotificationReplyPayload,
+};
 use axum::extract::ConnectInfo;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -40,6 +43,70 @@ struct UntrustPayload {
 lazy_static::lazy_static! {
     pub static ref ECO_NETWORK_DEVICES: Arc<RwLock<Vec<DiscoveredEcoDevice>>> =
         Arc::new(RwLock::new(Vec::new()));
+
+    /// Peer device_id -> address (ip:ECO_TLS_PORT) learned from inbound
+    /// requests. Used by the toast activation path to route replies/actions
+    /// back to the phone without holding a tokio runtime handle.
+    pub static ref ECO_DEVICE_ADDRS: std::sync::Mutex<HashMap<String, SocketAddr>> =
+        std::sync::Mutex::new(HashMap::new());
+}
+
+/// All IPv4 addresses of usable local interfaces (excludes loopback,
+/// link-local and the rmnet 192.0.0/24 internal range). Scanners skip these
+/// so a multi-interface host never discovers itself: the legacy single-IP
+/// self-skip missed the wlan address whenever `local_ip()` guessed rmnet.
+pub fn local_ipv4s() -> Vec<std::net::Ipv4Addr> {
+    let mut local_ips: Vec<std::net::Ipv4Addr> = Vec::new();
+    if let Ok(ifaces) = local_ip_address::list_afinet_netifas() {
+        for (_name, ip) in ifaces {
+            if let std::net::IpAddr::V4(v4) = ip {
+                if !v4.is_loopback() {
+                    local_ips.push(v4);
+                }
+            }
+        }
+    }
+    local_ips
+}
+
+/// IPv4 /24 subnets of all usable local interfaces, private-range subnets
+/// first, capped at MAX_SCAN_SUBNETS.
+///
+/// Discovery used to guess one interface via `local_ip()`; on multi-homed
+/// hosts (Android rmnet enumerated before wlan0, desktop VPN/vEthernet
+/// adapters) it picked the wrong subnet, making that side blind to peers
+/// while staying fully discoverable itself — the one-way-visibility bug.
+pub fn local_subnets() -> Vec<String> {
+    const MAX_SCAN_SUBNETS: usize = 4;
+
+    let mut local_ips = local_ipv4s();
+    if local_ips.is_empty() {
+        // Legacy fallback: single-interface guess.
+        if let Ok(std::net::IpAddr::V4(v4)) = local_ip_address::local_ip() {
+            local_ips.push(v4);
+        }
+    }
+
+    let mut subnets: Vec<(bool, String)> = Vec::new(); // (is_private, "a.b.c")
+    for v4 in local_ips {
+        let octets = v4.octets();
+        // Skip loopback, link-local (169.254/16) and 192.0.0/24 (Qualcomm
+        // rmnet internal addressing — never carries LAN peers, and probing
+        // its 254 dead addresses wastes ~10s per scan pass).
+        if v4.is_loopback() || (octets[0] == 169 && octets[1] == 254) || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0) {
+            continue;
+        }
+        let subnet = format!("{}.{}.{}", octets[0], octets[1], octets[2]);
+        if subnets.iter().any(|(_, s)| *s == subnet) {
+            continue;
+        }
+        let is_private = octets[0] == 192 && octets[1] == 168
+            || octets[0] == 10
+            || octets[0] == 172 && (16..=31).contains(&octets[1]);
+        subnets.push((is_private, subnet));
+    }
+    subnets.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    subnets.into_iter().take(MAX_SCAN_SUBNETS).map(|(_, s)| s).collect()
 }
 
 pub(crate) struct DiscoveredDevice {
@@ -77,12 +144,15 @@ impl DeviceDiscovery {
                     let did = dev_id.clone();
                     let dnm = dev_name.clone();
                     async move {
+                        let fastswap_tls_port = crate::fastswap::get_fastswap_tls_port();
                         axum::Json(serde_json::json!({
                             "status": "ok",
                             "ecosystem": true,
                             "clipboard_sync": true,
+                            "notification_sync": true,
                             "device_id": did,
                             "device_name": dnm,
+                            "fastswap_port": fastswap_tls_port,
                         }))
                     }
                 }
@@ -120,6 +190,14 @@ impl DeviceDiscovery {
                         let p = body.0;
                         let sender_id = p.sender_id;
                         let sender_name = p.sender_name;
+
+                        // Remember how to reach this peer (toast routing).
+                        if let Ok(mut addrs) = ECO_DEVICE_ADDRS.lock() {
+                            addrs.insert(
+                                sender_id.clone(),
+                                SocketAddr::new(remote_addr.ip(), ECO_TLS_PORT),
+                            );
+                        }
 
                         // Direct two-way link: trust the requesting device immediately.
                         let mut eco_network = ECO_NETWORK_DEVICES.write().await;
@@ -168,15 +246,29 @@ impl DeviceDiscovery {
             }))
             .route("/api/ecosystem/v1/notification/sync", axum::routing::post({
                 let bus = event_bus.clone();
-                move |body: axum::extract::Json<NotificationSyncPayload>| {
+                move |ConnectInfo(remote_addr): ConnectInfo<SocketAddr>, body: axum::extract::Json<NotificationSyncPayload>| {
                     let bus = bus.clone();
                     async move {
                         let payload = body.0;
+                        // Remember how to reach this peer for toast replies/actions.
+                        if let Ok(mut addrs) = ECO_DEVICE_ADDRS.lock() {
+                            addrs.insert(
+                                payload.source_device_id.clone(),
+                                SocketAddr::new(remote_addr.ip(), ECO_TLS_PORT),
+                            );
+                        }
                         let notif = crate::eco::notification::NotificationData {
                             id: payload.notification_id,
+                            notification_key: payload.notification_key,
+                            app_package: payload.app_package,
                             app_name: payload.app_name,
                             title: payload.title,
                             body: payload.body,
+                            icon: payload.icon,
+                            icon_hash: payload.icon_hash,
+                            actions: payload.actions,
+                            can_reply: payload.can_reply,
+                            messages: payload.messages,
                             device_name: payload.source_device_name,
                             device_id: payload.source_device_id,
                             timestamp: payload.timestamp,
@@ -199,10 +291,33 @@ impl DeviceDiscovery {
                         let payload = body.0;
                         let reply = crate::eco::notification::NotificationReply {
                             notification_id: payload.notification_id,
+                            notification_key: payload.notification_key,
                             reply_text: payload.reply_text,
                             source_device_id: payload.source_device_id,
                         };
                         bus.emit(EcoEvent::NotificationReplied(reply));
+                        axum::Json(serde_json::json!({"status": "ok"}))
+                    }
+                }
+            }))
+            .route("/api/ecosystem/v1/notification/dismiss", axum::routing::post({
+                let bus = event_bus.clone();
+                move |body: axum::extract::Json<NotificationDismissPayload>| {
+                    let bus = bus.clone();
+                    async move {
+                        let payload = body.0;
+                        bus.emit(EcoEvent::NotificationDismissed(payload));
+                        axum::Json(serde_json::json!({"status": "ok"}))
+                    }
+                }
+            }))
+            .route("/api/ecosystem/v1/notification/action", axum::routing::post({
+                let bus = event_bus.clone();
+                move |body: axum::extract::Json<NotificationActionPayload>| {
+                    let bus = bus.clone();
+                    async move {
+                        let payload = body.0;
+                        bus.emit(EcoEvent::NotificationActionRequested(payload));
                         axum::Json(serde_json::json!({"status": "ok"}))
                     }
                 }
@@ -217,8 +332,9 @@ impl DeviceDiscovery {
         });
     }
 
-    /// Periodically scan the subnet on eco's dedicated ports (53327 HTTP, 53328 TLS)
-    /// to discover peers — mirrors FastSwap's subnet probing but on eco's own ports.
+    /// Periodically scan every local interface's /24 on eco's dedicated ports
+    /// (53327 HTTP, 53328 TLS) to discover peers — mirrors FastSwap's subnet
+    /// probing but on eco's own ports, across all subnets (see `local_subnets`).
     pub async fn start_discovery(&self) {
         let known_devices = self.known_devices.clone();
 
@@ -227,13 +343,27 @@ impl DeviceDiscovery {
                 let local_ip = local_ip_address::local_ip()
                     .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)));
                 let local_ip_str = local_ip.to_string();
-                let (peers_http, peers_tls) = tokio::join!(
-                    Self::scan_subnet_http(&local_ip),
-                    Self::scan_subnet_tls(&local_ip),
-                );
-                let http_count = peers_http.len();
-                let tls_count = peers_tls.len();
-                let all_peers = peers_http.into_iter().chain(peers_tls);
+                let subnets = local_subnets();
+                let scans = subnets
+                    .iter()
+                    .map(|subnet| async move {
+                        tokio::join!(
+                            Self::scan_subnet(subnet, false),
+                            Self::scan_subnet(subnet, true),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let mut http_count = 0usize;
+                let mut tls_count = 0usize;
+                let mut all_peers: Vec<EcoDevice> = Vec::new();
+                for (peers_http, peers_tls) in futures::future::join_all(scans).await {
+                    http_count += peers_http.len();
+                    tls_count += peers_tls.len();
+                    all_peers.extend(peers_http.into_iter().chain(peers_tls));
+                }
+                // A peer reachable on both ports shows up twice — dedup by id.
+                all_peers.sort_by_key(|p| p.id);
+                all_peers.dedup_by(|a, b| a.id == b.id);
                 let mut devices = known_devices.write().await;
                 let mut network_list = ECO_NETWORK_DEVICES.write().await;
                 let mut seen_ids = std::collections::HashSet::new();
@@ -342,6 +472,10 @@ impl DeviceDiscovery {
                         .unwrap_or("")
                         .to_string();
                     eco.capabilities.clipboard_sync = true;
+                    eco.capabilities.notification_sync = body
+                        .get("notification_sync")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     Some(eco)
                 } else {
                     None
@@ -351,33 +485,21 @@ impl DeviceDiscovery {
         }
     }
 
-    /// Scan the /24 subnet via HTTP on the ecosystem port (53327).
-    async fn scan_subnet_http(local_ip: &std::net::IpAddr) -> Vec<EcoDevice> {
-        Self::scan_subnet(local_ip, DEFAULT_ECO_PORT, false).await
-    }
-
-    /// Scan the /24 subnet via HTTPS on the ecosystem TLS port (53328).
-    async fn scan_subnet_tls(local_ip: &std::net::IpAddr) -> Vec<EcoDevice> {
-        Self::scan_subnet(local_ip, ECO_TLS_PORT, true).await
-    }
-
-    /// Generic subnet scan: probes all 254 IPs in the /24 on the given port/scheme.
-    async fn scan_subnet(local_ip: &std::net::IpAddr, port: u16, use_tls: bool) -> Vec<EcoDevice> {
-        let subnet = match local_ip {
-            std::net::IpAddr::V4(v4) => {
-                let octets = v4.octets();
-                format!("{}.{}.{}", octets[0], octets[1], octets[2])
-            }
-            _ => return Vec::new(),
-        };
+    /// Scan one /24 subnet (`"a.b.c"`) on the ecosystem HTTP (53327) or TLS
+    /// (53328) port. Skips every local interface address so the probe host
+    /// never discovers itself (see `local_ipv4s`).
+    async fn scan_subnet(subnet: &str, use_tls: bool) -> Vec<EcoDevice> {
+        let port = if use_tls { ECO_TLS_PORT } else { DEFAULT_ECO_PORT };
+        let self_ips: std::collections::HashSet<std::net::Ipv4Addr> =
+            local_ipv4s().into_iter().collect();
 
         let mut discovered = Vec::new();
         let mut tasks = Vec::new();
 
         for i in 1..=254 {
             let ip = format!("{}.{}", subnet, i);
-            if let Ok(probe_ip) = ip.parse::<std::net::IpAddr>() {
-                if probe_ip == *local_ip {
+            if let Ok(std::net::IpAddr::V4(v4)) = ip.parse::<std::net::IpAddr>() {
+                if self_ips.contains(&v4) {
                     continue;
                 }
             }

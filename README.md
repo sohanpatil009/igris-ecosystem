@@ -12,9 +12,10 @@ Everything runs locally on your network as a single native binary for **Windows,
 
 ### Device Mesh
 - **LAN Device Discovery** — Automatically finds every IGRIS instance on the local subnet:
-  - Subnet scan of `/24` (IPs 1–254, up to 50 concurrent probes) against the HTTP and TLS ports
+  - Multi-interface /24 scan (IPs 1–254, up to 50 concurrent probes) against the HTTP and TLS ports — every usable local IPv4 interface's subnet is scanned (private ranges first), so multi-homed hosts (VPN, vEthernet, second NICs) never go blind; the probe host's own addresses on all interfaces are skipped to prevent self-discovery
   - 30-second heartbeat refresh; untrusted devices age out after 120 seconds; trusted devices persist as offline
 - **Link & Trust** — Pair devices with a one-click link handshake over HTTPS; trusted (linked) devices are the only ones that receive clipboard and notification data
+- **Stable Identity** — The device UUID is persisted (`pkg/device_id`) so links survive restarts; a fresh random ID per launch used to silently break every existing link until a manual re-pair
 - **Encrypted Transport** — All peer traffic travels over TLS 1.3 (self-signed certs via `rcgen` + `rustls`), with a transparent TLS proxy terminating at each device's local HTTP service
 - **Event-Driven Architecture** — A pub/sub event bus (`DeviceDiscovered`, `ClipboardChanged`, `NotificationReceived`, `DeviceTrusted`, …) lets future features subscribe without touching the core
 - **Persistent State** — Devices, trust lists, clipboard history (50 entries), and notification history (100 entries) stored as JSON under `pkg/ecosystem/`
@@ -63,7 +64,7 @@ The binary also ships a voice module (wake word, offline STT/TTS, plugin-driven 
 src/
 ├── eco/                         # Active device-mesh runtime
 │   ├── manager.rs               #   EcoManager lifecycle (init → start → shutdown)
-│   ├── discovery.rs             #   Axum HTTP server (53327) + subnet scan (HTTP/TLS)
+│   ├── discovery.rs             #   Axum HTTP server (53327) + multi-interface subnet scan
 │   ├── clipboard.rs             #   ClipboardManager — 1s poll + hash diff
 │   ├── notification.rs          #   NotificationManager — 2s poll, reply, history
 │   ├── sync.rs                  #   SyncManager — fan-out to linked peers
@@ -148,7 +149,7 @@ Sender (FastSwap)                          Receiver (FastSwap)
 ### Build & Run
 
 ```bash
-git clone <repo-url> && cd igrisv4
+git clone <repo-url> && cd igris-ecosystem
 cargo run --release
 ```
 
@@ -159,6 +160,17 @@ First launch runs the setup manager, which installs the runtime packages (models
 2. Open the **Devices** tab — each machine appears within one scan cycle (~30 s)
 3. Click **LINK** on the peer — the handshake completes over HTTPS; both sides mark each other as trusted
 4. Copy text on either device — it appears on the linked device's clipboard instantly
+
+### Mobile Companions
+Android phones join the same mesh through the native companion app
+([`igris-android`](../igris-android)), which drives the shared protocol crate
+([`igris-protocol`](../igris-protocol)) — identical wire protocol, so the
+desktop discovers and links phones exactly like any other peer. Clipboard
+from an Android background requires the app's gesture-detection machinery
+(see its README); phone pushes arrive like any other peer's.
+
+Field-verified mesh: **Windows desktop + POCO F6 (HyperOS) + iQOO I2501
+(Funtouch OS)** — clipboard, discovery, and pairing across all three.
 
 ### Send Files
 1. Open the **FastSwap** panel
@@ -185,14 +197,15 @@ First launch runs the setup manager, which installs the runtime packages (models
 }
 ```
 
-### Data & state — `pkg/ecosystem/`
+### Data & state — `pkg/`
 | File | Contents |
 |------|----------|
-| `ecosystem_config.json` | Sync toggles, device name, port |
-| `trusted_devices.json` | Persistent linked-device IDs |
-| `clipboard_history.json` | Last 50 clipboard entries (hash, content, source, timestamp) |
-| `notification_history.json` | Last 100 notifications with read/replied state |
-| `ecosystem_key.pem` / `.pub` | rcgen key pair + self-signed cert (device identity) |
+| `device_id` | This device's persistent UUID (stable across restarts — peers key their trust store by it) |
+| `ecosystem/ecosystem_config.json` | Sync toggles, device name, port |
+| `ecosystem/trusted_devices.json` | Persistent linked-device IDs |
+| `ecosystem/clipboard_history.json` | Last 50 clipboard entries (hash, content, source, timestamp) |
+| `ecosystem/notification_history.json` | Last 100 notifications with read/replied state |
+| `ecosystem/ecosystem_key.pem` / `.pub` | rcgen key pair + self-signed cert (device identity) |
 
 ### TLS certificates — `pkg/certs/`
 Self-signed `fastswap_cert.der` / `fastswap_key.der` generated on first run (SAN `igris.local`).
@@ -222,7 +235,7 @@ cargo run --release    # run
 
 Notes:
 - The ecosystem runs inside the main process — no separate daemon or service
-- Discovery scans IPv4 `/24` subnets; cross-subnet setups can use manual IPs
+- Discovery scans every usable IPv4 interface's /24 (private ranges first, max 4 subnets, self-addresses skipped); cross-subnet setups can use manual IPs
 - Outbound peer traffic always uses the TLS proxy port; inbound arrives plaintext on the local listener
 - Session state (transfers, devices, history) is in-memory except the JSON stores listed above
 
@@ -232,29 +245,34 @@ Notes:
 
 | Issue | Solution |
 |-------|----------|
-| Devices not discovered | Same subnet required; allow ports 53317/53318/53327/53328 in the firewall; wait one 30 s scan cycle |
-| Clipboard not syncing | Both devices must be **LINKED** (trusted); sync is text-only; ensure `clipboard_sync: true` |
+| Devices not discovered | Same subnet required; allow ports 53317/53318/53327/53328 in the firewall; wait one 30 s scan cycle. Discovery now scans **all** local interfaces' /24s, so VPN/virtual adapters no longer blind it |
+| One device sees the other but not vice versa | The blind side picked a wrong network interface before — fixed by multi-interface scanning; also check the port-fallback trap below |
+| Desktop invisible after relaunch | A second running instance silently binds 53329+ (fallback range) and is invisible to scanners — kill duplicate `igrisecosystem` processes before relaunching |
+| Clipboard not syncing | Both devices must be **LINKED** (trusted); sync is text-only; ensure `clipboard_sync: true`; links survive restarts via the persisted `pkg/device_id` |
 | Transfer approval times out | The 60-second approval window expired — the sender sees a timeout |
 | Files missing on receive | Check `~/Downloads`; conflict-renamed files get a `(1)` suffix |
 | Notifications empty | Notification *reading* is platform-limited: macOS fully supported; Windows/Linux expose the API but system-level read-back may return nothing |
 | Certificate errors | Self-signed certs are expected — the app accepts them by design on the LAN |
-| Ports in use | Server and proxy retry across 10-port ranges and log the actual ports |
+| Ports in use | Server and proxy retry across 10-port ranges and log the actual ports — but peers only scan the canonical ports, so a fallback instance is undiscoverable |
 
 ---
 
 ## Roadmap
 
-- [x] LAN device discovery (IPv4 subnet scan)
+- [x] LAN device discovery (multi-interface IPv4 subnet scan)
 - [x] Link/trust handshake with persistent trust store
+- [x] Persistent device identity (`pkg/device_id`) — links survive restarts
 - [x] Universal clipboard sync (loop-proof, hash-diffed)
 - [x] Cross-device notification mirror + reply
 - [x] FastSwap file transfer (LocalSend v2.0, TLS, approval flow, folders)
 - [x] Cross-platform abstraction layer (clipboard, notifications, system control)
+- [x] Android companion on the shared protocol core ([`igris-android`](../igris-android) + [`igris-protocol`](../igris-protocol)); background clipboard verified on HyperOS and Funtouch OS
 - [ ] Image/file clipboard sync
 - [ ] Transfer history persistence
 - [ ] Remote input and media control between devices
 - [ ] Relay mode for non-LAN (cross-subnet / internet) peers
 - [ ] Session handoff and shared AI memory between devices
+- [ ] Converge desktop onto the shared `igris-protocol` crate (currently a fork; protocol logic is duplicated)
 
 ---
 

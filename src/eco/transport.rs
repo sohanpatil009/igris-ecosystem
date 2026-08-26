@@ -1,6 +1,9 @@
 use crate::eco::constants::*;
 use crate::eco::errors::{EcoError, EcoResult};
-use crate::eco::protocol::{ClipboardSyncPayload, NotificationSyncPayload, NotificationReplyPayload};
+use crate::eco::protocol::{
+    ClipboardSyncPayload, NotificationActionPayload, NotificationDismissPayload,
+    NotificationSyncPayload, NotificationReplyPayload,
+};
 use std::net::SocketAddr;
 
 pub struct EcoTransport {
@@ -73,6 +76,118 @@ impl EcoTransport {
         let resp = self.http_client
             .post(&url)
             .json(payload)
+            .send()
+            .await
+            .map_err(|e| EcoError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(EcoError::Transport(format!(
+                "Peer returned status {}", resp.status()
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Tell a peer to dismiss one of its notifications via HTTPS.
+    pub async fn send_notification_dismiss(
+        &self,
+        addr: &SocketAddr,
+        payload: &NotificationDismissPayload,
+    ) -> EcoResult<()> {
+        let url = format!("https://{}/api/ecosystem/v1/notification/dismiss", addr);
+        let resp = self.http_client
+            .post(&url)
+            .json(payload)
+            .send()
+            .await
+            .map_err(|e| EcoError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(EcoError::Transport(format!(
+                "Peer returned status {}", resp.status()
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Ask a peer to fire one of its notification's action buttons via HTTPS.
+    pub async fn send_notification_action(
+        &self,
+        addr: &SocketAddr,
+        payload: &NotificationActionPayload,
+    ) -> EcoResult<()> {
+        let url = format!("https://{}/api/ecosystem/v1/notification/action", addr);
+        let resp = self.http_client
+            .post(&url)
+            .json(payload)
+            .send()
+            .await
+            .map_err(|e| EcoError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(EcoError::Transport(format!(
+                "Peer returned status {}", resp.status()
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Send a pairing request to a peer via HTTPS. The peer trusts us
+    /// immediately (direct two-way link) — this is the phone-initiated LINK.
+    pub async fn send_pair_request(
+        &self,
+        addr: &SocketAddr,
+        sender_id: &str,
+        sender_name: &str,
+        sender_port: u16,
+    ) -> EcoResult<()> {
+        #[derive(serde::Serialize)]
+        struct PairRequestPayload {
+            sender_id: String,
+            sender_name: String,
+            sender_port: u16,
+        }
+        let url = format!("https://{}/api/ecosystem/v1/pair/request", addr);
+        let resp = self.http_client
+            .post(&url)
+            .json(&PairRequestPayload {
+                sender_id: sender_id.to_string(),
+                sender_name: sender_name.to_string(),
+                sender_port,
+            })
+            .send()
+            .await
+            .map_err(|e| EcoError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(EcoError::Transport(format!(
+                "Peer returned status {}", resp.status()
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Tell a peer to stop trusting us (the UNLINK direction). The peer
+    /// untrusts the device identified by `device_id` (our own id).
+    pub async fn send_untrust(
+        &self,
+        addr: &SocketAddr,
+        device_id: &str,
+    ) -> EcoResult<()> {
+        #[derive(serde::Serialize)]
+        struct UntrustPayload {
+            device_id: String,
+        }
+        let url = format!("https://{}/api/ecosystem/v1/pair/untrust", addr);
+        let resp = self.http_client
+            .post(&url)
+            .json(&UntrustPayload {
+                device_id: device_id.to_string(),
+            })
             .send()
             .await
             .map_err(|e| EcoError::Transport(e.to_string()))?;

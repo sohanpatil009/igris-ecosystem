@@ -89,7 +89,7 @@ fn resolve_conflict_path(path: &std::path::Path) -> std::path::PathBuf {
 
 #[derive(Clone)]
 pub struct ServerState {
-    pub local_device: Device,
+    pub local_device: Arc<RwLock<Device>>,
     pub sessions: Arc<RwLock<Vec<TransferState>>>,
 }
 
@@ -108,7 +108,7 @@ pub fn create_router(state: ServerState) -> Router {
 }
 
 async fn info_handler(State(state): State<ServerState>) -> Json<Device> {
-    Json(state.local_device.clone())
+    Json(state.local_device.read().await.clone())
 }
 
 async fn register_handler(
@@ -117,12 +117,14 @@ async fn register_handler(
 ) -> Json<RegisterResponse> {
     tracing::info!("Device registered: {}", request.alias);
 
+    let device = state.local_device.read().await;
+
     Json(RegisterResponse {
-        alias: state.local_device.alias.clone(),
+        alias: device.alias.clone(),
         version: "2.0".to_string(),
-        device_model: state.local_device.device_model.clone(),
-        device_type: state.local_device.device_type.clone(),
-        fingerprint: state.local_device.id.clone(),
+        device_model: device.device_model.clone(),
+        device_type: device.device_type.clone(),
+        fingerprint: device.id.clone(),
     })
 }
 
@@ -160,6 +162,8 @@ async fn prepare_upload_handler(
         file_count: safe_files.len(),
         total_size: safe_files.iter().map(|f| f.size).sum(),
         files: safe_files.iter().map(|f| f.file_name.clone()).collect(),
+        created_at: std::time::Instant::now(),
+        awaiting_approval: false,
     };
 
     crate::fastswap::add_pending_transfer(pending).await;
@@ -192,6 +196,7 @@ async fn prepare_upload_handler(
         transferred: 0,
         status: TransferStatus::Preparing,
         confirmed: false,
+        created_at: std::time::Instant::now(),
     };
 
     state.sessions.write().await.push(transfer_state);
@@ -209,20 +214,26 @@ async fn confirm_upload_handler(
     tracing::info!("Confirming upload for session: {}", request.session_id);
 
     let notify = crate::fastswap::register_approval_watch(&request.session_id).await;
-    let max_wait = std::time::Duration::from_secs(60);
+    crate::fastswap::mark_awaiting(&request.session_id).await;
 
-    tracing::info!("Waiting for user approval...");
+    // Skip the wait if the user already accepted (accept can land before this
+    // request arrives — the popup only shows awaiting sessions, but the click
+    // and the HTTP request race).
+    if !crate::fastswap::is_transfer_approved(&request.session_id).await {
+        let max_wait = std::time::Duration::from_secs(60);
 
-    let notified = tokio::time::timeout(max_wait, notify.notified()).await;
+        tracing::info!("Waiting for user approval...");
 
-    let is_approved = match notified {
-        Ok(()) => crate::fastswap::is_transfer_approved(&request.session_id).await,
-        Err(_) => {
+        let notified = tokio::time::timeout(max_wait, notify.notified()).await;
+
+        if notified.is_err() {
             tracing::warn!("Timeout waiting for approval: {}", request.session_id);
             crate::fastswap::deny_transfer(&request.session_id).await;
             return Err(StatusCode::REQUEST_TIMEOUT);
         }
-    };
+    }
+
+    let is_approved = crate::fastswap::is_transfer_approved(&request.session_id).await;
 
     if !is_approved {
         tracing::warn!("Transfer denied by user: {}", request.session_id);
@@ -257,6 +268,8 @@ async fn confirm_upload_handler(
         "Upload confirmed for session: {} - Progress tracking initialized",
         request.session_id
     );
+
+    crate::fastswap::clear_approved(&request.session_id).await;
 
     Ok(Json(ConfirmUploadResponse {
         status: "ready".to_string(),
@@ -395,8 +408,9 @@ pub async fn start_server(
     port: u16,
     local_device: Device,
 ) -> Result<u16, Box<dyn std::error::Error>> {
+    let device = Arc::new(RwLock::new(local_device.clone()));
     let state = ServerState {
-        local_device: local_device.clone(),
+        local_device: device.clone(),
         sessions: Arc::new(RwLock::new(Vec::new())),
     };
 
@@ -406,9 +420,27 @@ pub async fn start_server(
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            let tracker = crate::fastswap::get_progress_tracker();
+            let tracker_guard = tracker.read().await;
             let mut sessions = cleanup_sessions.write().await;
             let before = sessions.len();
-            sessions.retain(|s| s.status != TransferStatus::Completed);
+            sessions.retain(|s| {
+                match s.status {
+                    // Confirm never arrived (or was denied/timed out) —
+                    // a Preparing session is only valid while the 60 s
+                    // approval window is open.
+                    TransferStatus::Preparing => {
+                        s.created_at.elapsed() < std::time::Duration::from_secs(120)
+                    }
+                    // Keep only sessions with a live, unfinished transfer.
+                    TransferStatus::Transferring => tracker_guard
+                        .get(&s.session_id)
+                        .map(|p| !(p.is_complete() || p.is_cancelled))
+                        .unwrap_or(false),
+                    _ => false,
+                }
+            });
+            drop(tracker_guard);
             if before != sessions.len() {
                 tracing::info!("Cleaned up {} stale sessions", before - sessions.len());
             }
@@ -420,7 +452,14 @@ pub async fn start_server(
 
         match tokio::net::TcpListener::bind(&addr).await {
             Ok(listener) => {
-                tracing::info!("Server started successfully on port {}", try_port);
+                // Update the device with the actual TLS port (HTTP port + 1, or 53318 if HTTP is 53317)
+                let tls_port = if try_port == 53317 { 53318 } else { try_port + 1 };
+                {
+                    let mut dev = device.write().await;
+                    dev.port = tls_port;
+                }
+
+                tracing::info!("Server started successfully on HTTP port {}, TLS port {}", try_port, tls_port);
                 tracing::info!("Device: {} ({})", local_device.alias, local_device.ip);
 
                 tokio::spawn(async move {

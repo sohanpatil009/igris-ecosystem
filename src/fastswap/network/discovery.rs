@@ -16,6 +16,28 @@ impl DiscoveryService {
         }
     }
 
+    /// Scan every local interface's /24 for FastSwap peers (see
+    /// `eco::discovery::local_subnets` — a single-interface guess goes blind
+    /// on multi-homed hosts). Merges and dedups by device id.
+    pub async fn scan_all_networks(&self) -> Result<Vec<Device>> {
+        let subnets = crate::eco::discovery::local_subnets();
+        let mut merged: Vec<Device> = Vec::new();
+        for subnet in subnets {
+            let found = self.scan_subnet(&subnet).await?;
+            for device in found {
+                if !merged.iter().any(|d| d.id == device.id) {
+                    merged.push(device);
+                }
+            }
+        }
+
+        let mut devices = self.devices.write().await;
+        *devices = merged.clone();
+
+        tracing::info!("Scan complete. Found {} devices", merged.len());
+        Ok(merged)
+    }
+
     pub async fn scan_network(&self, local_ip: &str) -> Result<Vec<Device>> {
         tracing::info!("Starting network scan from {}", local_ip);
 
@@ -28,11 +50,31 @@ impl DiscoveryService {
 
         let subnet = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
 
+        let found = self.scan_subnet(&subnet).await?;
+        discovered.extend(found);
+
+        let mut devices = self.devices.write().await;
+        *devices = discovered.clone();
+
+        tracing::info!("Scan complete. Found {} devices", discovered.len());
+        Ok(discovered)
+    }
+
+    /// Probe all 254 addresses of one /24 subnet on the FastSwap TLS port.
+    async fn scan_subnet(&self, subnet: &str) -> Result<Vec<Device>> {
+        let self_ips: std::collections::HashSet<std::net::Ipv4Addr> =
+            crate::eco::discovery::local_ipv4s().into_iter().collect();
+
+        let mut discovered = Vec::new();
         let mut tasks = Vec::new();
 
         for i in 1..=254 {
             let ip = format!("{}.{}", subnet, i);
-            if ip == local_ip {
+            let is_self = ip
+                .parse::<std::net::Ipv4Addr>()
+                .map(|v4| self_ips.contains(&v4))
+                .unwrap_or(false);
+            if is_self {
                 continue;
             }
 

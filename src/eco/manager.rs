@@ -85,6 +85,21 @@ impl EcoManager {
                 notification_sync: self.config.notification_sync,
                 ..Default::default()
             };
+            // Stable identity across restarts. Peers key their trust store by
+            // device id; a fresh random UUID per launch silently broke every
+            // existing link until someone re-paired manually.
+            let id_file = pkg_dir.join("device_id");
+            match std::fs::read_to_string(&id_file)
+                .ok()
+                .and_then(|s| uuid::Uuid::parse_str(s.trim()).ok())
+            {
+                Some(id) => device.id = id,
+                None => {
+                    if let Err(e) = std::fs::write(&id_file, device.id.to_string()) {
+                        tracing::warn!("[ECO] could not persist device id: {}", e);
+                    }
+                }
+            }
         }
 
         let permissions = EcoPermissions::new(
@@ -232,13 +247,12 @@ impl EcoManager {
 
         // ---- Notification sync ----
         if self.config.notification_sync {
-            println!("[ECO] Notification sync ENABLED (polling every 2s)");
+            println!("[ECO] Notification sync ENABLED (mirroring phone notifications)");
             let notification = self.notification.clone();
             let event_bus = self.event_bus.clone();
-            let transport = self.transport.clone();
-            let known_devices = self.discovery.as_ref().map(|d| d.get_known_devices());
 
-            // Subscribe to incoming notifications from peers
+            // Subscribe to incoming notifications from peers: store them and
+            // mirror them as native toasts.
             {
                 let notification = notification.clone();
                 event_bus.subscribe(Arc::new(move |event| {
@@ -248,61 +262,33 @@ impl EcoManager {
                                 notif.device_name, notif.app_name, notif.title);
                             if let Some(ref mgr) = notification {
                                 if let Ok(mut guard) = mgr.lock() {
-                                    guard.receive_remote(notif);
+                                    guard.receive_remote(notif.clone());
                                 }
                             }
+                            #[cfg(target_os = "windows")]
+                            crate::platform::ecosystem::notifications::toasts::show_toast(&notif);
                         }
                     }
                 }));
             }
 
-            // Poll local notifications periodically
-            let notification_poll = notification.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(
-                    std::time::Duration::from_secs(2)
-                );
-                loop {
-                    interval.tick().await;
-                    if let Some(ref mgr) = notification_poll {
-                        let new_notifs = {
+            // Subscribe to remote dismissals: remove from local history so
+            // the mirror + UI follow the phone's swipe-away, and hide the
+            // native toast.
+            {
+                let notification = notification.clone();
+                event_bus.subscribe(Arc::new(move |event| {
+                    if let EcoEvent::NotificationDismissed(payload) = event {
+                        if let Some(ref mgr) = notification {
                             if let Ok(mut guard) = mgr.lock() {
-                                guard.poll_local()
-                            } else {
-                                vec![]
-                            }
-                        };
-                        // Sync new notifications to peers
-                        for notif in new_notifs {
-                            if let Some(ref devices) = known_devices {
-                                let devices = devices.read().await;
-                                let local_device = notification_poll.as_ref()
-                                    .and_then(|m| m.lock().ok())
-                                    .map(|g| g.get_notifications().first().map(|n| n.device_id.clone()))
-                                    .flatten()
-                                    .unwrap_or_default();
-                                for (_id, device) in devices.iter() {
-                                    if let Some(addr) = device.device.addr {
-                                        let payload = crate::eco::protocol::NotificationSyncPayload {
-                                            notification_id: notif.id.clone(),
-                                            app_name: notif.app_name.clone(),
-                                            title: notif.title.clone(),
-                                            body: notif.body.clone(),
-                                            source_device_id: local_device.clone(),
-                                            source_device_name: notif.device_name.clone(),
-                                            timestamp: notif.timestamp,
-                                        };
-                                        let transport = transport.clone();
-                                        tokio::spawn(async move {
-                                            let _ = transport.send_notification(&addr, &payload).await;
-                                        });
-                                    }
-                                }
+                                guard.remove_remote(&payload.source_device_id, &payload.notification_key);
                             }
                         }
+                        #[cfg(target_os = "windows")]
+                        crate::platform::ecosystem::notifications::toasts::hide_toast(&payload.notification_key);
                     }
-                }
-            });
+                }));
+            }
 
             // Update global notification history for UI access
             {
@@ -377,13 +363,93 @@ impl EcoManager {
         self.notification.as_ref()
     }
 
+    /// Send a quick reply back to the originating phone (v2 wire path).
+    /// The clipboard/Ctrl+V hack is dead: replies route over the HTTPS
+    /// transport to the source device, which fires the RemoteInput.
     pub async fn reply_to_notification(&self, notification_id: &str, reply_text: &str) -> EcoResult<()> {
-        if let Some(ref mgr) = self.notification {
-            let guard = mgr.lock().map_err(|_| EcoError::Notification("Lock failed".to_string()))?;
-            guard.reply_to_notification(notification_id, reply_text)
-        } else {
-            Err(EcoError::NotInitialized)
+        if reply_text.trim().is_empty() {
+            return Err(EcoError::Notification("Empty reply".to_string()));
         }
+
+        // Locate the notification and its originating device.
+        let (notification_key, device_id) = {
+            let guard = self.notification
+                .as_ref()
+                .ok_or(EcoError::NotInitialized)?
+                .lock()
+                .map_err(|_| EcoError::Notification("Lock failed".to_string()))?;
+            let target = guard
+                .get_notifications()
+                .into_iter()
+                .find(|n| n.id == notification_id || n.notification_key == notification_id);
+            match target {
+                Some(n) => (n.notification_key, n.device_id),
+                None => return Err(EcoError::Notification(format!(
+                    "No such notification: {}", notification_id
+                ))),
+            }
+        };
+
+        let addr = {
+            let addrs = crate::eco::discovery::ECO_DEVICE_ADDRS.lock()
+                .map_err(|_| EcoError::Notification("Addr lock failed".to_string()))?;
+            addrs.get(&device_id).copied().ok_or_else(|| {
+                EcoError::Notification(format!("No route to device {}", device_id))
+            })?
+        };
+
+        let payload = crate::eco::protocol::NotificationReplyPayload {
+            notification_id: notification_id.to_string(),
+            notification_key,
+            reply_text: reply_text.to_string(),
+            source_device_id: crate::eco::pairing::get_local_device_id().unwrap_or_default(),
+        };
+        self.transport.send_notification_reply(&addr, &payload).await?;
+
+        // Reflect the reply locally.
+        if let Some(ref mgr) = self.notification {
+            if let Ok(mut guard) = mgr.lock() {
+                guard.mark_replied(notification_id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Ask the originating phone to fire one of the notification's action
+    /// buttons (v2 wire path).
+    pub async fn fire_notification_action(&self, notification_id: &str, action_index: u32) -> EcoResult<()> {
+        let (notification_key, device_id) = {
+            let guard = self.notification
+                .as_ref()
+                .ok_or(EcoError::NotInitialized)?
+                .lock()
+                .map_err(|_| EcoError::Notification("Lock failed".to_string()))?;
+            let target = guard
+                .get_notifications()
+                .into_iter()
+                .find(|n| n.id == notification_id || n.notification_key == notification_id);
+            match target {
+                Some(n) => (n.notification_key, n.device_id),
+                None => return Err(EcoError::Notification(format!(
+                    "No such notification: {}", notification_id
+                ))),
+            }
+        };
+
+        let addr = {
+            let addrs = crate::eco::discovery::ECO_DEVICE_ADDRS.lock()
+                .map_err(|_| EcoError::Notification("Addr lock failed".to_string()))?;
+            addrs.get(&device_id).copied().ok_or_else(|| {
+                EcoError::Notification(format!("No route to device {}", device_id))
+            })?
+        };
+
+        let payload = crate::eco::protocol::NotificationActionPayload {
+            notification_key,
+            action_index,
+            source_device_id: crate::eco::pairing::get_local_device_id().unwrap_or_default(),
+        };
+        self.transport.send_notification_action(&addr, &payload).await
     }
 
     pub fn get_notifications(&self) -> Vec<crate::eco::notification::NotificationData> {

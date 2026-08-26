@@ -9,9 +9,17 @@ pub fn IncomingTransferPopup(pending_transfers: Signal<Vec<PendingTransfer>>) ->
     if pending_transfers().is_empty() {
         return rsx! {};
     }
-    
-    // Show the first pending transfer
-    let transfer = pending_transfers()[0].clone();
+
+    // Only surface transfers whose sender is actively blocked waiting for
+    // our decision (confirm-upload received). Stale/unconfirmed entries are
+    // never shown, so Accept can never approve the wrong session.
+    let Some(transfer) = pending_transfers()
+        .iter()
+        .find(|t| t.awaiting_approval)
+        .cloned()
+    else {
+        return rsx! {};
+    };
     
     rsx! {
         // Full screen overlay
