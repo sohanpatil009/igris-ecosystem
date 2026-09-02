@@ -1,4 +1,4 @@
-use crate::eco::clipboard::ClipboardData;
+use crate::eco::clipboard::{ClipboardData, ClipboardManager};
 use crate::eco::device::EcoDevice;
 use crate::eco::discovery::{DiscoveredDevice, ECO_NETWORK_DEVICES};
 use crate::eco::errors::EcoResult;
@@ -15,6 +15,7 @@ pub struct SyncManager {
     transport: Arc<EcoTransport>,
     known_devices: Arc<RwLock<HashMap<String, DiscoveredDevice>>>,
     local_device: Arc<RwLock<EcoDevice>>,
+    clipboard: Arc<std::sync::Mutex<ClipboardManager>>,
 }
 
 impl SyncManager {
@@ -23,12 +24,14 @@ impl SyncManager {
         transport: Arc<EcoTransport>,
         known_devices: Arc<RwLock<HashMap<String, DiscoveredDevice>>>,
         local_device: Arc<RwLock<EcoDevice>>,
+        clipboard: Arc<std::sync::Mutex<ClipboardManager>>,
     ) -> Self {
         Self {
             event_bus,
             transport,
             known_devices,
             local_device,
+            clipboard,
         }
     }
 
@@ -36,12 +39,14 @@ impl SyncManager {
         let transport = self.transport.clone();
         let known_devices = self.known_devices.clone();
         let local_device = self.local_device.clone();
+        let clipboard = self.clipboard.clone();
 
         let handler: Arc<dyn Fn(EcoEvent) + Send + Sync> = Arc::new(move |event| {
             if let EcoEvent::ClipboardChanged(data) = event {
                 let transport = transport.clone();
                 let known_devices = known_devices.clone();
                 let local_device = local_device.clone();
+                let clipboard = clipboard.clone();
                 tokio::spawn(async move {
                     // Only LINKED (trusted) peers receive clipboard updates.
                     let trusted: HashSet<String> = {
@@ -71,6 +76,8 @@ impl SyncManager {
                     }
 
                     if targets.is_empty() {
+                        // Leave `last_delivered_hash` unset so the identical
+                        // local change is re-pushed when a peer shows up.
                         return;
                     }
 
@@ -87,8 +94,20 @@ impl SyncManager {
                     };
 
                     println!("[ECO] Broadcasting clipboard to {} linked peer(s)", targets.len());
+                    let mut delivered = false;
                     for addr in targets {
-                        let _ = transport.send_clipboard(&addr, &payload).await;
+                        match transport.send_clipboard(&addr, &payload).await {
+                            Ok(_) => delivered = true,
+                            Err(e) => println!("[ECO] Clipboard send to {} failed: {}", addr, e),
+                        }
+                    }
+                    // Only dedup once the content reached a peer; otherwise an
+                    // identical re-push is retried (peer was offline at push
+                    // time). Mirrors igris-protocol.
+                    if delivered {
+                        if let Ok(mut guard) = clipboard.lock() {
+                            guard.mark_delivered(&data.content_hash);
+                        }
                     }
                 });
             }

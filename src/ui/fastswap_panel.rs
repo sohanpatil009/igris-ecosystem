@@ -529,16 +529,31 @@ async fn send_files_to_device(
         vec![String::new(); files.len()]
     };
     
-    // Get local device info
+    // Get local device info. Prefer the on-demand-started local device so the
+    // port we advertise is the one actually bound (start_on_demand updates
+    // FASTSWAP_DEVICE.port after a fallback bind); fall back to a fresh local
+    // identity on the default port.
     let local_ip = local_ip_address::local_ip()
         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 100)))
         .to_string();
-    
-    let local_device = crate::fastswap::Device::new_local(
-        format!("IGRIS-{}", whoami::username()),
-        53317,
-        local_ip
-    );
+
+    let local_device = {
+        let mut dev = {
+            let guard = crate::fastswap::FASTSWAP_DEVICE.lock().unwrap();
+            guard.clone()
+        };
+        match dev {
+            Some(mut d) => {
+                d.ip = local_ip.clone();
+                d
+            }
+            None => crate::fastswap::Device::new_local(
+                format!("IGRIS-{}", whoami::username()),
+                53317,
+                local_ip,
+            ),
+        }
+    };
     
     // Get global progress tracker
     let progress_tracker = crate::fastswap::get_progress_tracker();

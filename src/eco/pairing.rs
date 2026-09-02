@@ -77,6 +77,10 @@ impl PairingManager {
         self.active_sessions.clone()
     }
 
+    pub fn get_trusted_ids(&self) -> Vec<String> {
+        self.storage.lock().map(|s| s.get_trusted_device_ids().clone()).unwrap_or_default()
+    }
+
     pub fn generate_otp() -> String {
         generate_otp_code()
     }
@@ -195,6 +199,42 @@ pub fn init_pairing_manager(storage: Arc<std::sync::Mutex<EcoStorage>>) {
 
 pub fn get_pairing_manager() -> Option<std::sync::MutexGuard<'static, Option<PairingManager>>> {
     PAIRING_MANAGER.lock().ok()
+}
+
+/// Synchronous persistence helpers used from server handlers where holding the
+/// `PAIRING_MANAGER` guard across an `.await` is undesirable. All storage writes
+/// are quick std::fs operations.
+pub fn persist_trust(device_id: &str) {
+    if let Some(guard) = get_pairing_manager() {
+        if let Some(manager) = guard.as_ref() {
+            if let Ok(mut storage) = manager.storage.lock() {
+                storage.trust_device(device_id).ok();
+            }
+        }
+    }
+}
+
+pub fn persist_untrust(device_id: &str) {
+    if let Some(guard) = get_pairing_manager() {
+        if let Some(manager) = guard.as_ref() {
+            if let Ok(mut storage) = manager.storage.lock() {
+                storage.untrust_device(device_id).ok();
+            }
+        }
+    }
+}
+
+pub fn is_trusted_sync(device_id: &str) -> bool {
+    if let Some(guard) = get_pairing_manager() {
+        if let Some(manager) = guard.as_ref() {
+            return manager
+                .storage
+                .lock()
+                .map(|s| s.is_device_trusted(device_id))
+                .unwrap_or(false);
+        }
+    }
+    false
 }
 
 lazy_static::lazy_static! {

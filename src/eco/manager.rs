@@ -72,7 +72,14 @@ impl EcoManager {
 
         let storage = EcoStorage::new(pkg_dir);
         storage.init_dirs()?;
-        self.storage = Arc::new(std::sync::Mutex::new(storage));
+        let storage = Arc::new(std::sync::Mutex::new(storage));
+        // Wire the global pairing manager to this storage so trust persists
+        // and the /info trusted_peers list and /notification/sync trust gate
+        // work. Without this, PAIRING_MANAGER stays None and every trust
+        // operation (persist / is_trusted / trusted_peers) silently no-ops —
+        // links evaporate and clipboard/notification syncs keep failing.
+        crate::eco::pairing::init_pairing_manager(storage.clone());
+        self.storage = storage;
 
         let crypto = EcoCrypto::new(pkg_dir)?;
         let public_key_pem = crypto.public_key_pem();
@@ -197,6 +204,9 @@ impl EcoManager {
         let discovery = Arc::new(DeviceDiscovery::new(
             self.event_bus.clone(),
         ));
+        // Share the runtime config with discovery so /info returns live values
+        // instead of reading from a file that may not exist (e.g. on phone).
+        discovery.set_runtime_config(self.config.clone());
         discovery.start_server(&http_addr).await;
         discovery.start_discovery().await;
         discovery.run_cleanup().await;
@@ -209,6 +219,7 @@ impl EcoManager {
             transport.clone(),
             known_devices.clone(),
             self.local_device.clone(),
+            self.clipboard.clone().unwrap(),
         ));
         let _ = sync.start().await;
         self.sync = Some(sync);
@@ -219,12 +230,35 @@ impl EcoManager {
             let manager_ptr = self.clipboard.clone().unwrap();
             event_bus.subscribe(Arc::new(move |event| {
                 if let EcoEvent::ClipboardReceived(data, _from) = event {
-                    println!("[ECO] Applying received clipboard (hash={})", &data.content_hash[..16]);
+                    let hash_short = if data.content_hash.len() >= 16 { &data.content_hash[..16] } else { &data.content_hash };
+                    println!("[ECO] ClipboardReceived event: hash={} content_len={}", hash_short, data.content.len());
                     let manager = manager_ptr.clone();
-                    tokio::spawn(async move {
-                        if let Ok(mut guard) = manager.lock() {
-                            let _ = guard.apply_clipboard(&data);
+                    // Use spawn_blocking: std::sync::Mutex::lock() blocks the
+                    // current thread; must never run on the tokio runtime.
+                    tokio::task::spawn_blocking(move || {
+                        let mut guard = match manager.lock() {
+                            Ok(g) => g,
+                            Err(_) => {
+                                println!("[ECO] ClipboardReceived: failed to lock manager");
+                                return;
+                            }
+                        };
+                        println!("[ECO] ClipboardReceived: locked manager, checking should_apply");
+                        if !guard.should_apply(&data) {
+                            println!("[ECO] ClipboardReceived: should_apply returned false, skipping");
+                            return;
                         }
+                        println!("[ECO] ClipboardReceived: should_apply returned true, calling write_to_platform");
+                        // Platform write is blocking I/O (Android JNI) — do it
+                        // while holding the lock so no concurrent poll overwrites
+                        // our dedup state between check and write.
+                        if let Err(e) = guard.write_to_platform(&data) {
+                            println!("[ECO] platform write failed: {}", e);
+                            return;
+                        }
+                        println!("[ECO] ClipboardReceived: write_to_platform succeeded, calling mark_applied");
+                        guard.mark_applied(&data);
+                        println!("[ECO] ClipboardReceived: mark_applied done, hash applied successfully");
                     });
                 }
             }));
@@ -482,7 +516,12 @@ impl EcoManager {
             let mut guard = clipboard.lock().map_err(|_| {
                 EcoError::Clipboard("Lock failed".to_string())
             })?;
-            guard.apply_clipboard(&data)
+            if !guard.should_apply(&data) {
+                return Ok(());
+            }
+            guard.write_to_platform(&data)?;
+            guard.mark_applied(&data);
+            Ok(())
         } else {
             Err(EcoError::NotInitialized)
         }

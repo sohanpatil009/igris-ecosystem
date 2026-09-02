@@ -88,17 +88,23 @@ pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
         let dev_name = dev.name.clone();
         let dev_ip = dev.ip.clone();
         let dev_port = dev.port;
+        let local_port = crate::eco::constants::ECO_TLS_PORT;
         spawn(async move {
             let local_id = pairing::get_local_device_id().unwrap_or_else(|| "unknown".to_string());
             let local_name = pairing::get_local_device_name().unwrap_or_else(|| whoami::username());
 
+            // Persist trust BEFORE sending request to prevent stale-trust
+            // auto-unlink on the peer's next discovery scan.
+            crate::eco::pairing::persist_trust(&dev_id);
+
             let payload = serde_json::json!({
                 "sender_id": local_id,
                 "sender_name": local_name,
-                "sender_port": 53328,
+                "sender_port": local_port,
             });
 
-            let url = format!("https://{}:{}/api/ecosystem/v1/pair/request", dev_ip, dev_port);
+            let scheme = if dev_port == crate::eco::constants::DEFAULT_ECO_PORT { "http" } else { "https" };
+            let url = format!("{}://{}:{}/api/ecosystem/v1/pair/request", scheme, dev_ip, dev_port);
             let client = reqwest::Client::builder()
                 .danger_accept_invalid_certs(true)
                 .timeout(std::time::Duration::from_secs(5))
@@ -148,7 +154,8 @@ pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
         let dev_port = dev.port;
         spawn(async move {
             let payload = serde_json::json!({ "device_id": dev_id });
-            let url = format!("https://{}:{}/api/ecosystem/v1/pair/untrust", dev_ip, dev_port);
+            let scheme = if dev_port == crate::eco::constants::DEFAULT_ECO_PORT { "http" } else { "https" };
+            let url = format!("{}://{}:{}/api/ecosystem/v1/pair/untrust", scheme, dev_ip, dev_port);
             let client = reqwest::Client::builder()
                 .danger_accept_invalid_certs(true)
                 .timeout(std::time::Duration::from_secs(5))

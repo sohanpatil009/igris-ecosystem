@@ -41,6 +41,11 @@ pub struct EcoDevice {
     pub addr: Option<SocketAddr>,
     #[serde(skip)]
     pub last_seen: Option<Instant>,
+    /// Peer's self-reported list of trusted device IDs (from `/info`).
+    /// `None` = peer is an old binary that doesn't report this field.
+    /// `Some([])` = peer reports it has no trusted peers (stale trust).
+    #[serde(default)]
+    pub trusted_peers: Option<Vec<String>>,
 }
 
 impl EcoDevice {
@@ -56,6 +61,7 @@ impl EcoDevice {
             public_key: None,
             addr: None,
             last_seen: Some(Instant::now()),
+            trusted_peers: None,
         }
     }
 

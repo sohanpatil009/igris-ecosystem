@@ -1,3 +1,4 @@
+use crate::eco::config::EcosystemConfig;
 use crate::eco::constants::*;
 use crate::eco::device::EcoDevice;
 use crate::eco::events::{EcoEvent, EventBus};
@@ -117,6 +118,7 @@ pub(crate) struct DiscoveredDevice {
 pub struct DeviceDiscovery {
     known_devices: Arc<RwLock<HashMap<String, DiscoveredDevice>>>,
     event_bus: Arc<EventBus>,
+    runtime_config: Arc<std::sync::RwLock<EcosystemConfig>>,
 }
 
 impl DeviceDiscovery {
@@ -124,6 +126,13 @@ impl DeviceDiscovery {
         Self {
             known_devices: Arc::new(RwLock::new(HashMap::new())),
             event_bus,
+            runtime_config: Arc::new(std::sync::RwLock::new(EcosystemConfig::default())),
+        }
+    }
+
+    pub fn set_runtime_config(&self, config: EcosystemConfig) {
+        if let Ok(mut cfg) = self.runtime_config.write() {
+            *cfg = config;
         }
     }
 
@@ -135,24 +144,46 @@ impl DeviceDiscovery {
         let event_bus = self.event_bus.clone();
         let local_id = crate::eco::pairing::get_local_device_id();
         let local_name = crate::eco::pairing::get_local_device_name();
+        let runtime_config = self.runtime_config.clone();
 
         let app = axum::Router::new()
             .route("/api/ecosystem/v1/info", axum::routing::get({
                 let dev_id = local_id.clone();
                 let dev_name = local_name.clone();
+                let cfg_ref = runtime_config.clone();
                 move || {
                     let did = dev_id.clone();
                     let dnm = dev_name.clone();
+                    let cfg_ref = cfg_ref.clone();
                     async move {
                         let fastswap_tls_port = crate::fastswap::get_fastswap_tls_port();
+                        let (cfg_clipboard_sync, cfg_notification_sync) = {
+                            let cfg_guard = cfg_ref.read().unwrap();
+                            (cfg_guard.clipboard_sync, cfg_guard.notification_sync)
+                        };
+
+                        let trusted_peers: Vec<String> = {
+                            if let Some(guard) = crate::eco::pairing::get_pairing_manager() {
+                                if let Some(manager) = guard.as_ref() {
+                                    manager.get_trusted_ids()
+                                } else {
+                                    Vec::new()
+                                }
+                            } else {
+                                Vec::new()
+                            }
+                        };
+
                         axum::Json(serde_json::json!({
                             "status": "ok",
                             "ecosystem": true,
-                            "clipboard_sync": true,
-                            "notification_sync": true,
+                            "clipboard_sync": cfg_clipboard_sync,
+                            "notification_sync": cfg_notification_sync,
                             "device_id": did,
                             "device_name": dnm,
+                            "device_type": "desktop",
                             "fastswap_port": fastswap_tls_port,
+                            "trusted_peers": trusted_peers,
                         }))
                     }
                 }
@@ -195,7 +226,7 @@ impl DeviceDiscovery {
                         if let Ok(mut addrs) = ECO_DEVICE_ADDRS.lock() {
                             addrs.insert(
                                 sender_id.clone(),
-                                SocketAddr::new(remote_addr.ip(), ECO_TLS_PORT),
+                                SocketAddr::new(remote_addr.ip(), p.sender_port),
                             );
                         }
 
@@ -217,9 +248,21 @@ impl DeviceDiscovery {
                         }
                         drop(eco_network);
 
-                        bus.emit(EcoEvent::DeviceTrusted(
-                            std::sync::Arc::new(crate::eco::device::EcoDevice::new(sender_id))
-                        ));
+                        // Persist trust so it survives restarts.
+                        crate::eco::pairing::persist_trust(&sender_id);
+
+                        // Emit a DeviceTrusted event carrying the REAL peer
+                        // identity (mirrors the igris-protocol fix). The old
+                        // `EcoDevice::new(sender_id)` produced a fresh random
+                        // UUID with the sender's UUID as its *name*, so any
+                        // consumer of the event saw a bogus device until the
+                        // next discovery scan replaced it.
+                        let mut trusted = crate::eco::device::EcoDevice::new(sender_name);
+                        trusted.id = uuid::Uuid::parse_str(&sender_id).unwrap_or_else(|_| {
+                            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, sender_id.as_bytes())
+                        });
+                        trusted.addr = Some(remote_addr);
+                        bus.emit(EcoEvent::DeviceTrusted(std::sync::Arc::new(trusted)));
 
                         axum::Json(serde_json::json!({
                             "status": "ok",
@@ -240,6 +283,10 @@ impl DeviceDiscovery {
                                 dev.is_trusted = false;
                             }
                         }
+                        drop(eco_network);
+                        // Persist the unlink so it survives restarts — matches
+                        // the LINK side, which writes through persist_trust().
+                        crate::eco::pairing::persist_untrust(&p.device_id);
                         axum::Json(serde_json::json!({"status": "ok"}))
                     }
                 }
@@ -250,11 +297,28 @@ impl DeviceDiscovery {
                     let bus = bus.clone();
                     async move {
                         let payload = body.0;
+                        if !crate::eco::pairing::is_trusted_sync(&payload.source_device_id) {
+                            return axum::Json(serde_json::json!({"status": "error", "message": "untrusted"}));
+                        }
                         // Remember how to reach this peer for toast replies/actions.
+                        // Prefer the port we actually found the peer on (probe /
+                        // discovery result) over the hard-coded TLS guess: a peer
+                        // whose eco TLS proxy failed to bind (e.g. a phone that
+                        // only answers plain HTTP) would otherwise get replies
+                        // routed to a refused port. This was the root cause of
+                        // one-way clipboard/notification failures (log evidence:
+                        // "Clipboard send to 192.168.1.4:53328 failed ... refused").
+                        let known_port = {
+                            let net = ECO_NETWORK_DEVICES.read().await;
+                            net.iter()
+                                .find(|d| d.id == payload.source_device_id)
+                                .map(|d| d.port)
+                        };
+                        let reply_port = known_port.unwrap_or(ECO_TLS_PORT);
                         if let Ok(mut addrs) = ECO_DEVICE_ADDRS.lock() {
                             addrs.insert(
                                 payload.source_device_id.clone(),
-                                SocketAddr::new(remote_addr.ip(), ECO_TLS_PORT),
+                                SocketAddr::new(remote_addr.ip(), reply_port),
                             );
                         }
                         let notif = crate::eco::notification::NotificationData {
@@ -275,10 +339,11 @@ impl DeviceDiscovery {
                             read: false,
                             replied: false,
                         };
-                        bus.emit(EcoEvent::NotificationReceived(
-                            notif,
-                            "remote".to_string(),
-                        ));
+                        let notif_arc = std::sync::Arc::new(notif);
+                        std::thread::spawn(move || {
+                            let notif = (*notif_arc).clone();
+                            bus.emit(EcoEvent::NotificationReceived(notif, "remote".to_string()));
+                        });
                         axum::Json(serde_json::json!({"status": "ok"}))
                     }
                 }
@@ -295,7 +360,9 @@ impl DeviceDiscovery {
                             reply_text: payload.reply_text,
                             source_device_id: payload.source_device_id,
                         };
-                        bus.emit(EcoEvent::NotificationReplied(reply));
+                        std::thread::spawn(move || {
+                            bus.emit(EcoEvent::NotificationReplied(reply));
+                        });
                         axum::Json(serde_json::json!({"status": "ok"}))
                     }
                 }
@@ -317,7 +384,21 @@ impl DeviceDiscovery {
                     let bus = bus.clone();
                     async move {
                         let payload = body.0;
-                        bus.emit(EcoEvent::NotificationActionRequested(payload));
+                        std::thread::spawn(move || {
+                            bus.emit(EcoEvent::NotificationActionRequested(payload));
+                        });
+                        axum::Json(serde_json::json!({"status": "ok"}))
+                    }
+                }
+            }))
+            .route("/api/ecosystem/v1/notification/request", axum::routing::post({
+                let bus = event_bus.clone();
+                move |body: axum::extract::Json<serde_json::Value>| {
+                    let bus = bus.clone();
+                    async move {
+                        std::thread::spawn(move || {
+                            bus.emit(EcoEvent::NotificationRequested);
+                        });
                         axum::Json(serde_json::json!({"status": "ok"}))
                     }
                 }
@@ -337,6 +418,8 @@ impl DeviceDiscovery {
     /// probing but on eco's own ports, across all subnets (see `local_subnets`).
     pub async fn start_discovery(&self) {
         let known_devices = self.known_devices.clone();
+        let event_bus = self.event_bus.clone();
+        let local_id = crate::eco::pairing::get_local_device_id();
 
         tokio::spawn(async move {
             loop {
@@ -375,6 +458,13 @@ impl DeviceDiscovery {
                     match devices.get_mut(&id) {
                         Some(existing) => {
                             existing.last_heartbeat = now;
+                            // Refresh mutable fields so capability/config
+                            // changes on the peer are picked up promptly
+                            // (e.g. clipboard_sync toggled in runtime config).
+                            existing.device.addr = peer.addr;
+                            existing.device.capabilities = peer.capabilities.clone();
+                            existing.device.platform = peer.platform.clone();
+                            existing.device.trusted_peers = peer.trusted_peers.clone();
                         }
                         None => {
                             devices.insert(id.clone(), DiscoveredDevice {
@@ -394,15 +484,53 @@ impl DeviceDiscovery {
                             entry.port = port;
                             entry.is_online = true;
                             entry.last_seen_secs = 0;
+                            let mut trusted = crate::eco::pairing::is_trusted_sync(&id);
+                            // Stale trust detection: if we think this peer is
+                            // trusted but the peer's /info says it does NOT
+                            // trust us back, the peer likely restarted and lost
+                            // its trust state. Demote it locally so the UI
+                            // reflects the real state.
+                            if trusted {
+                                if let Some(ref local) = local_id {
+                                    match &peer.trusted_peers {
+                                        Some(ids) if !ids.contains(local) => {
+                                            trusted = false;
+                                            crate::eco::pairing::persist_untrust(&id);
+                                            event_bus.emit(EcoEvent::DeviceUntrusted(
+                                                std::sync::Arc::new(peer.clone()),
+                                            ));
+                                        }
+                                        None => {} // old binary, skip check
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            entry.is_trusted = trusted;
                         }
                         None => {
+                            let mut trusted = crate::eco::pairing::is_trusted_sync(&id);
+                            if trusted {
+                                if let Some(ref local) = local_id {
+                                    match &peer.trusted_peers {
+                                        Some(ids) if !ids.contains(local) => {
+                                            trusted = false;
+                                            crate::eco::pairing::persist_untrust(&id);
+                                            event_bus.emit(EcoEvent::DeviceUntrusted(
+                                                std::sync::Arc::new(peer.clone()),
+                                            ));
+                                        }
+                                        None => {}
+                                        _ => {}
+                                    }
+                                }
+                            }
                             network_list.push(DiscoveredEcoDevice {
                                 id: id.clone(),
                                 name: peer.name.clone(),
                                 hostname: peer.hostname.clone(),
                                 ip: ip_str,
                                 port,
-                                is_trusted: false,
+                                is_trusted: trusted,
                                 is_online: true,
                                 last_seen_secs: 0,
                             });
@@ -465,7 +593,7 @@ impl DeviceDiscovery {
                     let mut eco = EcoDevice::new(device_name);
                     eco.id = uuid;
                     if let Ok(ip_addr) = ip.parse::<std::net::IpAddr>() {
-                        eco.addr = Some(SocketAddr::new(ip_addr, ECO_TLS_PORT));
+                        eco.addr = Some(SocketAddr::new(ip_addr, port));
                     }
                     eco.hostname = body.get("device_model")
                         .and_then(|v| v.as_str())
@@ -476,6 +604,25 @@ impl DeviceDiscovery {
                         .get("notification_sync")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
+                    // Carry the peer's self-reported type ("mobile" for phones)
+                    // so the keep-alive tier can gate on mobile peers. Overwrites
+                    // the EcoDevice::new default (which is the *local* OS) — a
+                    // desktop peer omits both keys and stays non-mobile ("").
+                    eco.platform = body.get("device_type")
+                        .or_else(|| body.get("platform"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    // Peer's self-reported trusted device list — used to detect
+                    // stale trust (e.g. desktop restarted and lost trust).
+                    eco.trusted_peers = body
+                        .get("trusted_peers")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        });
                     Some(eco)
                 } else {
                     None

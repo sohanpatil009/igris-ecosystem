@@ -175,10 +175,12 @@ fn handle_activation(a: &ActivatedAction) {
     }
 }
 
-/// Fire-and-forget HTTPS POST from a detached thread (the COM activation
-/// callback has no tokio runtime on its thread).
+/// Fire-and-forget POST from a detached thread (the COM activation
+/// callback has no tokio runtime on its thread). Uses http/https based on
+/// the peer's port so it works with both TLS and HTTP-only peers.
 fn spawn_post<T: serde::Serialize>(addr: SocketAddr, path: &str, payload: &T) {
-    let url = format!("https://{}{}", addr, path);
+    let scheme = if addr.port() == crate::eco::constants::DEFAULT_ECO_PORT { "http" } else { "https" };
+    let url = format!("{}://{}{}", scheme, addr, path);
     let body = serde_json::to_vec(payload).unwrap_or_default();
     std::thread::spawn(move || {
         let client = reqwest::blocking::Client::builder()

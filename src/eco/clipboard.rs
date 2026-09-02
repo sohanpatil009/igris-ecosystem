@@ -21,6 +21,10 @@ pub struct ClipboardManager {
     storage: Arc<std::sync::Mutex<EcoStorage>>,
     last_content_hash: Option<String>,
     last_applied_hash: Option<String>,
+    /// Hash of the last local change that was actually delivered to at least
+    /// one linked peer. Used to retry a push that failed while peers were
+    /// offline instead of deduping it away forever.
+    last_delivered_hash: Option<String>,
 }
 
 impl ClipboardManager {
@@ -35,6 +39,7 @@ impl ClipboardManager {
             storage,
             last_content_hash: None,
             last_applied_hash: None,
+            last_delivered_hash: None,
         }
     }
 
@@ -57,13 +62,25 @@ impl ClipboardManager {
                 let hash = hash_content(&text);
 
                 let is_own_change = Some(&hash) == guard.last_applied_hash.as_ref();
-                let is_unchanged = Some(&hash) == guard.last_content_hash.as_ref();
+                let is_known = Some(&hash) == guard.last_content_hash.as_ref();
+                let is_delivered = guard.last_delivered_hash.as_ref() == Some(&hash);
 
-                if is_own_change || is_unchanged {
+                // Dedup: skip if the hash matches what we last saw locally
+                // (`last_content_hash`) or what we applied from a peer
+                // (`last_applied_hash`).  The old condition also required
+                // `is_delivered`, which meant an offline peer caused every
+                // poll to re-detect and re-store the same clip.
+                if is_own_change || is_known {
                     continue;
                 }
 
-                println!("[ECO] Clipboard changed: hash={}", &hash[..16]);
+                println!(
+                    "[ECO] Clipboard changed: hash={} own={} known={} delivered={}",
+                    &hash[..16],
+                    is_own_change,
+                    is_known,
+                    is_delivered
+                );
 
                 let data = ClipboardData {
                     content: text.clone(),
@@ -97,18 +114,47 @@ impl ClipboardManager {
         }
     }
 
-    pub fn apply_clipboard(&mut self, data: &ClipboardData) -> EcoResult<()> {
-        if self.last_content_hash.as_ref() == Some(&data.content_hash) {
-            return Ok(());
-        }
+    /// Check whether incoming clipboard data should be applied (dedup gate).
+    /// Returns `true` if the content is new and should be written to the
+    /// local clipboard. Caller must call `mark_applied()` after a successful
+    /// write.
+    pub fn should_apply(&self, data: &ClipboardData) -> bool {
+        let result = self.last_content_hash.as_ref() != Some(&data.content_hash);
+        println!("[ECO] should_apply: hash={} last_known={} result={}",
+            &data.content_hash[..16],
+            self.last_content_hash.as_ref().map(|h| &h[..16]).unwrap_or("none"),
+            result);
+        result
+    }
 
-        self.platform.set_text(&data.content)?;
+    /// Write incoming clipboard to the local platform clipboard. This is a
+    /// blocking I/O call (FFI into Android/iOS) and must NEVER be called
+    /// while holding the Mutex.
+    pub fn write_to_platform(&self, data: &ClipboardData) -> EcoResult<()> {
+        println!("[ECO] write_to_platform: calling platform.set_text for hash={}", &data.content_hash[..16]);
+        let result = self.platform.set_text(&data.content);
+        println!("[ECO] write_to_platform: platform.set_text returned {:?}", result);
+        result
+    }
+
+    /// Mark clipboard as applied (update dedup hashes, emit event). Must be
+    /// called while holding the Mutex, but after `write_to_platform()`.
+    pub fn mark_applied(&mut self, data: &ClipboardData) {
         self.last_applied_hash = Some(data.content_hash.clone());
         self.last_content_hash = Some(data.content_hash.clone());
+        // Arrived via the mesh, so the mesh already has it — treat as delivered
+        // so an identical local re-read isn't re-broadcast as "undelivered".
+        self.last_delivered_hash = Some(data.content_hash.clone());
 
         let arc = Arc::new(data.clone());
         self.event_bus.emit(EcoEvent::ClipboardApplied(arc));
-        Ok(())
+    }
+
+    /// Record that a clipboard payload reached at least one linked peer, so an
+    /// identical local change is deduped again (no repeat fan-out). Called by
+    /// `SyncManager` after a successful fan-out; mirrors `igris-protocol`.
+    pub fn mark_delivered(&mut self, hash: &str) {
+        self.last_delivered_hash = Some(hash.to_string());
     }
 
     pub fn get_current_hash(&self) -> Option<String> {

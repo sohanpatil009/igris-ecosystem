@@ -130,6 +130,16 @@ impl FastSwapManager {
         self.server_handle = Some(proxy_handle);
         self.port = http_port;
 
+        // Keep the advertised local device in sync with the port we actually
+        // bound (`start_server` falls back up the range when 53317 is taken).
+        // `/info` and `register` report this to peers — the old code left the
+        // hard-coded 53317, so a fallback-bound host advertised a dead port.
+        if let Ok(mut dev_guard) = FASTSWAP_DEVICE.lock() {
+            if let Some(dev) = dev_guard.as_mut() {
+                dev.port = http_port;
+            }
+        }
+
         tracing::info!("[FastSwap] HTTP:{}, TLS:{}", http_port, tls_port);
         Ok(())
     }
