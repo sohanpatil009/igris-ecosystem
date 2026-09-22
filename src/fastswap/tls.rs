@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rcgen::{CertificateParams, IsCa, BasicConstraints, KeyUsagePurpose, KeyPair};
+use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use rustls::SignatureScheme;
 use std::fs;
 use std::path::PathBuf;
@@ -38,25 +38,24 @@ pub fn get_or_create_tls_config() -> Result<TlsConfig> {
             KeyUsagePurpose::DigitalSignature,
         ];
         let key_pair = KeyPair::generate().context("Failed to generate key pair")?;
-        let cert = params.self_signed(&key_pair)
+        let cert = params
+            .self_signed(&key_pair)
             .context("Failed to self-sign certificate")?;
 
         let cert_bytes = cert.der().to_vec();
         let key_bytes = key_pair.serialize_der();
 
         fs::create_dir_all(cert_dir()).context("Failed to create cert directory")?;
-        fs::write(cert_der_path(), &cert_bytes)
-            .context("Failed to write certificate")?;
-        fs::write(key_der_path(), &key_bytes)
-            .context("Failed to write key")?;
+        fs::write(cert_der_path(), &cert_bytes).context("Failed to write certificate")?;
+        fs::write(key_der_path(), &key_bytes).context("Failed to write key")?;
 
         (cert_bytes, key_bytes)
     };
 
     let cert = rustls::pki_types::CertificateDer::from(cert_der);
-    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
-        rustls::pki_types::PrivatePkcs8KeyDer::from(key_der),
-    );
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        key_der,
+    ));
 
     let server_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -68,16 +67,37 @@ pub fn get_or_create_tls_config() -> Result<TlsConfig> {
     })
 }
 
+/// LAN-ONLY trust: builds a TLS client that accepts ANY server certificate
+/// (via [`AcceptAnyCertVerifier`], no hostname / chain / expiry checks).
+///
+/// SECURITY BOUNDARY: safe only for link-local / trusted-LAN peers where the
+/// network itself is the trust root (same threat model as the eco HTTP
+/// discovery on 53327). It offers encryption against passive sniffing but
+/// ZERO authentication — an active MITM on the path can impersonate any peer.
+///
+/// MUST NOT be used over the internet / untrusted networks without pinning.
+/// TODO (before any internet use): pin the peer's certificate / SPKI
+/// fingerprint (or a private CA) and verify hostname + expiry; fail closed
+/// (deny-by-default) on mismatch with `E_FORBIDDEN` + audit log.
 pub fn get_dangerous_client_config() -> Result<rustls::ClientConfig> {
     let config = rustls::ClientConfig::builder()
         .dangerous()
-        .with_custom_certificate_verifier(
-            Arc::new(AcceptAnyCertVerifier),
-        )
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCertVerifier))
         .with_no_client_auth();
     Ok(config)
 }
 
+/// LAN-ONLY verifier: accepts any server certificate without verification.
+///
+/// Accepts any end-entity cert, intermediate, signature scheme allowlist, and
+/// server name. Exists solely for trusted-LAN FastSwap/eco TLS proxy peers
+/// (self-signed `igris.local` certs, no shared CA yet).
+///
+/// DO NOT expose to the internet: any network attacker can MITM the handshake.
+/// TODO (before internet): replace with fingerprint/CA pinning — store the
+/// peer's expected cert hash on first LINK (TOFU) or ship a private CA, then
+/// compare `end_entity` (and hostname/expiry) on every handshake and fail
+/// closed on mismatch.
 #[derive(Debug)]
 struct AcceptAnyCertVerifier;
 

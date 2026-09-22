@@ -21,18 +21,22 @@ dirs = "5.0"
 axum = "0.7"
 reqwest = { version = "0.11", features = ["stream", "json", "blocking"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "add-extension"] }
 rustls = { version = "0.23", features = ["ring"] }
 tokio-rustls = "0.26"
 rcgen = "0.13"
-hyper-util = { version = "0.1", features = ["tokio"] }
-tokio-util = { version = "0.7", features = ["io"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 local-ip-address = "0.6"
 whoami = "1.5"
 mime_guess = "2.0"
 rand = "0.8"
 lazy_static = "1.4"
+igris-core = { path = "crates/igris-core" }
+# ort links onnxruntime DYNAMICALLY (load-dynamic): sherpa-onnx-sys already
+# statics-links its own onnxruntime copy, and two static copies cannot link
+# into one binary (LNK2005/LNK2038). The DLL is loaded at runtime from the
+# app dir (see setup downloader + build.rs copy step).
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic", "ndarray"] }
+ndarray = "0.16"
 
 # Voice assistant / GUI
 dioxus = { version = "0.7", features = ["desktop"] }
@@ -44,9 +48,6 @@ regex = "1.10"
 urlencoding = "2.1"
 image = { version = "0.24", features = ["jpeg", "png"] }
 num_cpus = "1.16"
-indicatif = "0.17"
-console = { version = "0.16", features = ["std"] }
-zip = "0.6"
 rfd = "0.15"
 async-std = "1.12"
 fuzzy-matcher = "0.3"
@@ -57,6 +58,7 @@ tonic = { version = "0.12", features = ["tls", "tls-roots"] }
 prost = "0.13"
 prost-types = "0.13"
 dotenv = "0.15"
+dioxus-free-icons = "0.10.0"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["processthreadsapi", "winnt", "winuser", "winsock2", "ws2def", "handleapi", "processenv", "fileapi", "winbase"] }
@@ -93,3 +95,7 @@ path = "src/main.rs"
 [features]
 default = []
 with_riva = []
+
+[workspace]
+members = [".", "crates/igris-core"]
+resolver = "2"
