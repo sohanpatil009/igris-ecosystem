@@ -305,6 +305,65 @@ pub async fn is_transfer_approved(session_id: &str) -> bool {
     approved.contains(&session_id.to_string())
 }
 
+/// ---- Transfer history (replica fix5 intermediate, BUG-005) ----
+/// Completed sessions are forgotten on restart (in-memory only). This
+/// persists a small receipt per finished session to
+/// `pkg/ecosystem/transfer_history.json` (cap 50, newest first) so the
+/// FastSwap panel can show history + one-tap resend context. Full SQLite
+/// migration (`replica/schema.sql` transfer_sessions/files) replaces this
+/// file later with the same record shape.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TransferHistoryRecord {
+    pub session_id: String,
+    pub peer_name: String,
+    pub file_names: Vec<String>,
+    pub total_bytes: u64,
+    pub status: String,
+    pub finished_at: i64,
+}
+
+const TRANSFER_HISTORY_MAX: usize = 50;
+
+fn transfer_history_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("pkg")
+        .join("ecosystem")
+        .join("transfer_history.json")
+}
+
+/// Append a receipt; dedupes by session_id so the 200 ms UI poll that
+/// observes completion can't write the same session twice.
+pub fn record_transfer_history(rec: TransferHistoryRecord) {
+    let path = transfer_history_path();
+    let mut history = load_transfer_history();
+    if history.iter().any(|r| r.session_id == rec.session_id) {
+        return;
+    }
+    history.insert(0, rec);
+    history.truncate(TRANSFER_HISTORY_MAX);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(data) = serde_json::to_string_pretty(&history) {
+        let _ = std::fs::write(&path, data);
+    }
+}
+
+pub fn load_transfer_history() -> Vec<TransferHistoryRecord> {
+    let path = transfer_history_path();
+    let data = std::fs::read_to_string(&path).unwrap_or_default();
+    if data.trim().is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+pub fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// Drop the approval marker once the confirm handshake has consumed it.
 pub async fn clear_approved(session_id: &str) {
     APPROVED_SESSIONS

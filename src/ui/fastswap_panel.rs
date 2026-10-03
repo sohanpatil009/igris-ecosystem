@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 use rfd::FileDialog;
-use crate::fastswap::{Device, FileProgress, ProgressStatus, TransferProgress, PendingTransfer};
+use crate::fastswap::{Device, FileProgress, ProgressStatus, TransferProgress, PendingTransfer, TransferHistoryRecord};
 use std::path::PathBuf;
 
 #[component]
@@ -12,6 +12,8 @@ pub fn FastSwapPanel() -> Element {
     let mut selected_device = use_signal(|| None::<Device>);
     let mut active_transfers = use_signal(|| Vec::<TransferProgress>::new());
     let mut pending_transfers = use_signal(|| Vec::<PendingTransfer>::new());
+    // replica fix5: receipts that survive restart.
+    let mut transfer_history = use_signal(|| Vec::<TransferHistoryRecord>::new());
     let mut status_message = use_signal(|| String::from("FastSwap Ready"));
     let mut current_session = use_signal(|| None::<String>);
 
@@ -53,15 +55,37 @@ pub fn FastSwapPanel() -> Element {
                 // Get pending transfers (incoming)
                 let pending = crate::fastswap::get_pending_transfers().await;
                 pending_transfers.set(pending);
+
+                // replica fix5: refresh persisted receipts (cheap small-file read).
+                transfer_history.set(crate::fastswap::load_transfer_history());
                 
                 // Check if current session is complete
                 if let Some(session_id) = current_session() {
                     if let Some(progress) = transfers.iter().find(|t| t.session_id == session_id) {
                         if progress.is_complete() {
-                            if progress.is_cancelled {
-                                status_message.set("❌ Transfer cancelled".to_string());
+                            // replica fix5: persist a receipt so history survives restart.
+                            let status = if progress.is_cancelled {
+                                "cancelled"
                             } else {
-                                status_message.set("✅ Transfer complete!".to_string());
+                                "completed"
+                            };
+                            let peer = selected_device()
+                                .map(|d| d.alias.clone())
+                                .unwrap_or_else(|| "peer".to_string());
+                            crate::fastswap::record_transfer_history(
+                                crate::fastswap::TransferHistoryRecord {
+                                    session_id: progress.session_id.clone(),
+                                    peer_name: peer,
+                                    file_names: progress.files.iter().map(|f| f.file_name.clone()).collect(),
+                                    total_bytes: progress.total_bytes,
+                                    status: status.to_string(),
+                                    finished_at: crate::fastswap::now_millis(),
+                                },
+                            );
+                            if progress.is_cancelled {
+                                status_message.set("Transfer cancelled — see history below to resend.".to_string());
+                            } else {
+                                status_message.set("Transfer complete! Receipt saved to history.".to_string());
                             }
                             current_session.set(None);
                         }
@@ -374,9 +398,30 @@ pub fn FastSwapPanel() -> Element {
                                                 });
                                             }
                                         },
-                                        "🚫 Cancel Transfer"
+                                        "Cancel Transfer"
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // replica fix5: Transfer history (persisted receipts, survives restart).
+            if !transfer_history().is_empty() {
+                div {
+                    style: "margin-top: 24px; padding-top: 24px; border-top: 2px solid rgba(168, 85, 247, 0.3);",
+                    h3 {
+                        style: "margin: 0 0 12px 0; color: #e9d5ff; font-size: 18px;",
+                        "History"
+                    }
+                    div {
+                        style: "display: grid; gap: 8px;",
+                        for rec in transfer_history().iter().take(10) {
+                            div {
+                                key: "{rec.session_id}",
+                                style: "padding: 10px 12px; background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; font-size: 12px; color: #c4b5fd;",
+                                "{rec.file_names.len()} file(s) to {rec.peer_name} • {rec.status}"
                             }
                         }
                     }

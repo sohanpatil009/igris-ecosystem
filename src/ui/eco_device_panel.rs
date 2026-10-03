@@ -9,6 +9,8 @@ pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
 
     // Pairing state
     let mut pairing_status = use_signal(|| String::new());
+    // replica BUG-001: surface fallback-port invisibility in the UI.
+    let mut port_fallback = use_signal(|| false);
     // replica fix2: manual IP fallback when auto-scan finds nothing.
     let mut manual_ip = use_signal(|| String::new());
 
@@ -79,6 +81,14 @@ pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
                 drop(net_devices);
                 devices.set(devs);
                 is_scanning.set(false);
+
+                // replica BUG-001: flag fallback ports (invisible to scanners).
+                let fallback = std::fs::read_to_string("pkg/ecosystem/eco_ports.json")
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                    .and_then(|v| v.get("fallback").and_then(|f| f.as_bool()))
+                    .unwrap_or(false);
+                port_fallback.set(fallback);
 
                 async_std::task::sleep(std::time::Duration::from_secs(2)).await;
             }
@@ -230,6 +240,13 @@ pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
                         }
                     }
                     span { style: "padding: 2px 10px; border-radius: 4px; font-size: 9px; letter-spacing: 1px; background: rgba(34,197,94,0.12); color: #22c55e; font-family: monospace; border: 1px solid rgba(34,197,94,0.2);", "ACTIVE" }
+                }
+            }
+
+            // replica BUG-001: fallback-port warning (was silent invisibility).
+            if port_fallback() {
+                div { style: "margin-bottom: 12px; padding: 10px 16px; border-radius: 4px; font-size: 11px; font-family: monospace; color: #fbbf24; background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.25);",
+                    "Another IGRIS copy is running — this window sits on fallback ports and peers cannot see it. Close the other copy and relaunch."
                 }
             }
 
