@@ -9,6 +9,8 @@ pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
 
     // Pairing state
     let mut pairing_status = use_signal(|| String::new());
+    // replica fix2: manual IP fallback when auto-scan finds nothing.
+    let mut manual_ip = use_signal(|| String::new());
 
     let css = format!(r#"
         .ed-card {{
@@ -173,6 +175,38 @@ pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
         });
     };
 
+    // replica fix2: link by explicit LAN IP (e.g. 192.168.1.42) when the
+    // subnet scan finds nothing (AP isolation, VPN, firewall).
+    let do_manual_link = move |_| {
+        let ip = manual_ip().trim().to_string();
+        if ip.is_empty() {
+            pairing_status.set("Enter a LAN IP first, e.g. 192.168.1.42.".to_string());
+            return;
+        }
+        spawn(async move {
+            let local_id = pairing::get_local_device_id().unwrap_or_else(|| "unknown".to_string());
+            let local_name = pairing::get_local_device_name().unwrap_or_else(|| whoami::username());
+            let payload = serde_json::json!({
+                "sender_id": local_id,
+                "sender_name": local_name,
+                "sender_port": crate::eco::constants::ECO_TLS_PORT,
+            });
+            let url = format!("http://{}:{}/api/ecosystem/v1/pair/request", ip, crate::eco::constants::DEFAULT_ECO_PORT);
+            let client = reqwest::Client::builder()
+                .danger_accept_invalid_certs(true)
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_default();
+            match client.post(&url).json(&payload).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    pairing_status.set(format!("Link request sent to {} — accept on that device.", ip));
+                }
+                Ok(resp) => pairing_status.set(format!("Link to {} failed: {}", ip, resp.status())),
+                Err(e) => pairing_status.set(format!("Cannot reach {}: {}. Same Wi-Fi? Firewall open 53327/53328?", ip, e)),
+            }
+        });
+    };
+
     rsx! {
         div { style: format!("padding: 24px 32px; height: 100%; overflow-y: auto;"),
             style { "{css}" }
@@ -219,6 +253,23 @@ pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
                         }
                         div { style: "font-size: 11px; color: rgba(255,255,255,0.15);",
                             "Devices with IGRIS running will appear here automatically"
+                        }
+                        // replica fix1: one-click network check lives in the empty state.
+                        div { style: "font-size: 11px; color: rgba(255,255,255,0.35); margin-top: 12px; font-family: monospace;",
+                            "Same Wi-Fi? Allow 53327/53328 and 53317/53318 in the firewall. Kill duplicate igrisecosystem processes — fallback ports are invisible to scanners."
+                        }
+                        div { style: "display: flex; gap: 8px; margin-top: 12px; justify-content: center;",
+                            input {
+                                style: "padding: 6px 12px; font-size: 12px; font-family: monospace; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; color: #e5e7eb; outline: none; width: 180px;",
+                                placeholder: "192.168.1.42",
+                                value: "{manual_ip}",
+                                oninput: move |e| manual_ip.set(e.value()),
+                            }
+                            button {
+                                class: "ed-btn ed-btn-link",
+                                onclick: do_manual_link,
+                                "LINK BY IP"
+                            }
                         }
                     }
                 }

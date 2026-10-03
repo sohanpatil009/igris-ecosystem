@@ -43,7 +43,9 @@ impl EcoManager {
         let transport = Arc::new(EcoTransport::new());
 
         let device_name = config.device_name.clone();
-        let local_device = Arc::new(RwLock::new(EcoDevice::new(device_name)));
+        // replica fix6: stable identity — never a fresh random ID per launch.
+        let stable_id = crate::eco::device::load_or_create_persistent_id(pkg_dir);
+        let local_device = Arc::new(RwLock::new(EcoDevice::with_id(stable_id, device_name)));
 
         let storage = Arc::new(std::sync::Mutex::new(EcoStorage::new(pkg_dir)));
 
@@ -175,6 +177,31 @@ impl EcoManager {
             return Err(EcoError::Transport("Could not bind to any port".to_string()));
         }
         self.eco_port = port;
+        // replica BUG-001: a second instance silently binds 53329+ and is
+        // invisible to scanners (peers only probe canonical ports). Make the
+        // fallback loud + discoverable: log, persist actual ports, and leave
+        // a lock file so the UI can warn instead of showing an empty list.
+        if port != DEFAULT_ECO_PORT {
+            eprintln!(
+                "[ECO] WARNING: canonical port {} busy — bound {} instead. \
+                This instance is INVISIBLE to LAN scanners. Kill duplicate \
+                `igrisecosystem` processes and relaunch.",
+                DEFAULT_ECO_PORT, port
+            );
+        }
+        {
+            let dir = std::path::Path::new("pkg").join(ECO_STORAGE_DIR);
+            let _ = std::fs::create_dir_all(&dir);
+            let lock = serde_json::json!({
+                "pid": std::process::id(),
+                "eco_port": port,
+                "fallback": port != DEFAULT_ECO_PORT,
+            });
+            let _ = std::fs::write(
+                dir.join("eco_ports.json"),
+                serde_json::to_string_pretty(&lock).unwrap_or_default(),
+            );
+        }
 
         // ---- Start TLS proxy (eco TLS port -> eco HTTP port) ----
         let tls_cfg = tokio::task::spawn_blocking(|| crate::fastswap::tls::get_or_create_tls_config())
