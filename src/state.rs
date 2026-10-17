@@ -25,6 +25,8 @@ pub(crate) struct AssistantState {
     pub(crate) last_command: String,
     pub(crate) logs: Vec<(String, LogLevel)>,
     pub(crate) running_apps: Vec<String>,
+    /// True only while the on-demand voice/AI setup is running (opened via
+    /// the Dashboard/Chat tab). Never true at launch — the mesh starts first.
     pub(crate) setup_in_progress: bool,
 }
 
@@ -34,14 +36,14 @@ impl Default for AssistantState {
             is_initialized: false,
             is_listening: false,
             is_awake: false,
-            current_status: "Running First-Time Setup...".to_string(),
+            current_status: "Mesh starting...".to_string(),
             last_command: String::new(),
             logs: vec![(
-                "Welcome to IGRIS - Your Voice Assistant".to_string(),
+                "Welcome to IGRIS - Device mesh starting".to_string(),
                 LogLevel::Info,
             )],
             running_apps: Vec::new(),
-            setup_in_progress: true,
+            setup_in_progress: false,
         }
     }
 }

@@ -204,21 +204,39 @@ pub fn SetupGui() -> Element {
 
     // Pre-compute data for rendering
     let phase = state.current_phase.clone();
-    let has_downloads = !state.downloads.is_empty();
-    let has_extractions = !state.extractions.is_empty();
-    let has_validations = !state.validations.is_empty();
     let has_error = state.has_error;
     let is_complete = state.is_complete;
     let error_msg = state.error_message.clone();
 
-    // Convert to vectors for iteration
-    let downloads: Vec<_> = state.downloads.values().cloned().collect();
-    let extractions: Vec<_> = state
-        .extractions
+    // Enterprise single-progress aggregation: many parallel download /
+    // extract tasks collapse into one bar. Overall = mean of active
+    // progresses; completed items count as 100.
+    let mut items: Vec<(String, u32, bool)> = Vec::new();
+    for d in state.downloads.values() {
+        items.push((d.name.clone(), d.progress.min(100), d.is_complete));
+    }
+    for (k, v) in state.extractions.iter() {
+        items.push((k.clone(), (*v).min(100), *v >= 100));
+    }
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    let total = items.len().max(1) as u32;
+    let done_count = items.iter().filter(|(_, _, done)| *done).count() as u32
+        + state.validations.len() as u32;
+    let overall: u32 = if items.is_empty() {
+        if is_complete { 100 } else { 0 }
+    } else {
+        items.iter().map(|(_, p, _)| p).sum::<u32>() / total
+    };
+    let active_label = items
         .iter()
-        .map(|(k, v)| (k.clone(), *v))
-        .collect();
+        .find(|(_, _, done)| !done)
+        .map(|(n, p, _)| format!("{} — {}%", n, p))
+        .unwrap_or_else(|| {
+            if is_complete { "Complete".to_string() } else { "Preparing…".to_string() }
+        });
+    let has_activity = !items.is_empty();
     let validations = state.validations.clone();
+    let has_validations = !validations.is_empty();
     let logs = state.logs.clone();
 
     rsx! {
@@ -268,7 +286,7 @@ pub fn SetupGui() -> Element {
                     }
                     p {
                         style: "font-size: 16px; color: #9ca3af; letter-spacing: 2px; margin: 0;",
-                        "Voice Assistant Setup"
+                        "Voice Setup"
                     }
                 }
 
@@ -300,44 +318,36 @@ pub fn SetupGui() -> Element {
                     {render_phase_step("5", "Done", phase == SetupPhase::Complete, is_complete)}
                 }
 
-                // Downloads section
-                if has_downloads {
-                    div {
-                        style: "background: rgba(6, 182, 212, 0.1); border: 1px solid rgba(6, 182, 212, 0.3); border-radius: 12px; padding: 20px; margin-bottom: 20px;",
+                // Enterprise setup progress: ONE bar for all parallel tasks.
+                if has_activity && !is_complete {
+                    section {
+                        aria_label: "Setup progress",
+                        style: "background: rgba(34, 211, 238, 0.06); border: 1px solid rgba(34, 211, 238, 0.25); border-radius: 12px; padding: 20px; margin-bottom: 20px;",
 
                         div {
-                            style: "display: flex; align-items: center; gap: 10px; margin-bottom: 16px;",
-                            span { style: "font-size: 20px;", "📥" }
-                            span { style: "font-size: 16px; font-weight: 600; color: #06b6d4;", "Downloading Components" }
-                        }
-
-                        div {
-                            style: "display: flex; flex-direction: column; gap: 12px;",
-
-                            for download in downloads.iter() {
-                                {render_download_item(download)}
+                            style: "display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; min-width: 0;",
+                            span { style: "font-size: 16px; font-weight: 600; color: #22D3EE;", "Preparing Voice" }
+                            span { class: "igris-num", style: "font-size: 12px; font-weight: 600; color: #22D3EE; font-variant-numeric: tabular-nums;",
+                                "{done_count} done · {overall}%"
                             }
                         }
-                    }
-                }
-
-                // Extractions section
-                if has_extractions {
-                    div {
-                        style: "background: rgba(139, 92, 246, 0.1); border: 1px solid rgba(139, 92, 246, 0.3); border-radius: 12px; padding: 20px; margin-bottom: 20px;",
 
                         div {
-                            style: "display: flex; align-items: center; gap: 10px; margin-bottom: 16px;",
-                            span { style: "font-size: 20px;", "📦" }
-                            span { style: "font-size: 16px; font-weight: 600; color: #8b5cf6;", "Extracting Files" }
+                            role: "progressbar",
+                            aria_valuenow: "{overall}",
+                            aria_valuemin: "0",
+                            aria_valuemax: "100",
+                            aria_label: "Overall setup progress",
+                            style: "width: 100%; height: 8px; background: #1f2937; border-radius: 4px; overflow: hidden;",
+                            div {
+                                style: format!("width: {}%; height: 100%; border-radius: 4px; background: linear-gradient(90deg, #22D3EE, #A855F7); transition: width 0.3s ease;", overall),
+                            }
                         }
 
                         div {
-                            style: "display: flex; flex-direction: column; gap: 8px;",
-
-                            for (name, progress) in extractions.iter() {
-                                {render_extraction_item(name, *progress)}
-                            }
+                            aria_live: "polite",
+                            style: "margin-top: 10px; font-size: 12px; color: #9ca3af; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                            "{active_label}"
                         }
                     }
                 }
@@ -345,12 +355,11 @@ pub fn SetupGui() -> Element {
                 // Validations section
                 if has_validations {
                     div {
-                        style: "background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.3); border-radius: 12px; padding: 20px; margin-bottom: 20px;",
+                        style: "background: rgba(163, 230, 53, 0.06); border: 1px solid rgba(163, 230, 53, 0.25); border-radius: 12px; padding: 20px; margin-bottom: 20px;",
 
                         div {
                             style: "display: flex; align-items: center; gap: 10px; margin-bottom: 16px;",
-                            span { style: "font-size: 20px;", "✅" }
-                            span { style: "font-size: 16px; font-weight: 600; color: #22c55e;", "Validated Components" }
+                            span { style: "font-size: 16px; font-weight: 600; color: #A3E635;", "Ready Components" }
                         }
 
                         div {
@@ -358,7 +367,7 @@ pub fn SetupGui() -> Element {
 
                             for name in validations.iter() {
                                 span {
-                                    style: "background: rgba(34, 197, 94, 0.2); color: #22c55e; padding: 6px 12px; border-radius: 16px; font-size: 12px; font-weight: 500;",
+                                    style: "background: rgba(163, 230, 53, 0.12); color: #A3E635; padding: 6px 12px; border-radius: 16px; font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;",
                                     "✓ {name}"
                                 }
                             }
@@ -369,25 +378,24 @@ pub fn SetupGui() -> Element {
                 // Error display
                 if has_error {
                     div {
-                        style: "background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.5); border-radius: 12px; padding: 20px; margin-bottom: 20px;",
+                        role: "alert",
+                        style: "background: rgba(251, 113, 133, 0.08); border: 1px solid rgba(251, 113, 133, 0.5); border-radius: 12px; padding: 20px; margin-bottom: 20px;",
 
                         div {
                             style: "display: flex; align-items: flex-start; gap: 16px;",
 
-                            span { style: "font-size: 28px;", "❌" }
-
                             div {
                                 h3 {
-                                    style: "font-size: 16px; font-weight: 600; color: #ef4444; margin: 0 0 8px 0;",
-                                    "Setup Error"
+                                    style: "font-size: 16px; font-weight: 600; color: #FB7185; margin: 0 0 8px 0;",
+                                    "Setup Needs Attention"
                                 }
                                 p {
-                                    style: "font-size: 14px; color: #fca5a5; margin: 0 0 12px 0; line-height: 1.5;",
+                                    style: "font-size: 14px; color: #fca5a5; margin: 0 0 12px 0; line-height: 1.5; overflow-wrap: break-word;",
                                     "{error_msg}"
                                 }
                                 p {
                                     style: "font-size: 12px; color: #6b7280; margin: 0;",
-                                    "Please check your internet connection and try again."
+                                    "Check your connection and reopen the Dashboard to retry. Your devices stay linked."
                                 }
                             }
                         }
@@ -397,23 +405,18 @@ pub fn SetupGui() -> Element {
                 // Completion message
                 if is_complete {
                     div {
-                        style: "background: linear-gradient(135deg, rgba(34, 197, 94, 0.15), rgba(6, 182, 212, 0.15)); border: 1px solid rgba(34, 197, 94, 0.5); border-radius: 12px; padding: 32px; margin-bottom: 20px; text-align: center;",
-
-                        div { style: "font-size: 48px; margin-bottom: 12px;", "🎉" }
+                        role: "status",
+                        style: "background: linear-gradient(135deg, rgba(163, 230, 53, 0.1), rgba(34, 211, 238, 0.1)); border: 1px solid rgba(163, 230, 53, 0.4); border-radius: 12px; padding: 32px; margin-bottom: 20px; text-align: center;",
 
                         h2 {
-                            style: "font-size: 22px; font-weight: 700; color: #22c55e; margin: 0 0 8px 0;",
-                            "Setup Complete!"
+                            class: "igris-heading",
+                            style: "font-size: 22px; font-weight: 700; color: #A3E635; margin: 0 0 8px 0;",
+                            "Voice Ready"
                         }
 
                         p {
-                            style: "font-size: 14px; color: #9ca3af; margin: 0 0 16px 0;",
-                            "All components have been installed successfully."
-                        }
-
-                        p {
-                            style: "font-size: 14px; color: #06b6d4; margin: 0;",
-                            "Launching IGRIS Voice Assistant..."
+                            style: "font-size: 14px; color: #9ca3af; margin: 0;",
+                            "Voice is ready — return to the Dashboard."
                         }
                     }
                 }
@@ -430,7 +433,7 @@ pub fn SetupGui() -> Element {
                     div {
                         style: "display: flex; flex-direction: column; gap: 4px; font-family: 'Consolas', 'Monaco', monospace; font-size: 12px;",
 
-                        for log in logs.iter().rev().take(15) {
+                        for log in logs.iter().rev().take(5) {
                             {render_log_item(log)}
                         }
                     }
@@ -448,6 +451,9 @@ pub fn SetupGui() -> Element {
                 @keyframes pulse-glow {{
                     0%, 100% {{ box-shadow: 0 0 8px rgba(6, 182, 212, 0.4); }}
                     50% {{ box-shadow: 0 0 16px rgba(6, 182, 212, 0.8); }}
+                }}
+                @media (prefers-reduced-motion: reduce) {{
+                    * {{ animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }}
                 }}
                 "#
             }
@@ -518,99 +524,6 @@ fn is_phase_done(current: &SetupPhase, check: &SetupPhase) -> bool {
         SetupPhase::Error => 5,
     };
     order(current) > order(check)
-}
-
-/// Render a download item with progress bar
-fn render_download_item(download: &DownloadProgress) -> Element {
-    let name = download.name.clone();
-    let progress = download.progress;
-    let is_complete = download.is_complete;
-
-    let progress_width = format!("{}%", progress);
-    let status_text = if is_complete {
-        "Complete".to_string()
-    } else {
-        format!("{}%", progress)
-    };
-
-    let status_color = if is_complete {
-        "color: #22c55e;"
-    } else {
-        "color: #06b6d4;"
-    };
-    let bar_bg = if is_complete {
-        "background: linear-gradient(90deg, #22c55e, #16a34a);"
-    } else {
-        "background: linear-gradient(90deg, #06b6d4, #3b82f6);"
-    };
-
-    rsx! {
-        div {
-            style: "background: rgba(0, 0, 0, 0.3); border-radius: 8px; padding: 12px;",
-
-            div {
-                style: "display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;",
-
-                span {
-                    style: "font-size: 13px; font-weight: 500; color: #e5e7eb;",
-                    "{name}"
-                }
-
-                span {
-                    style: format!("font-size: 12px; font-weight: 600; {}", status_color),
-                    if is_complete { "✓ " } else { "" }
-                    "{status_text}"
-                }
-            }
-
-            div {
-                style: "width: 100%; height: 6px; background: #1f2937; border-radius: 3px; overflow: hidden;",
-
-                div {
-                    style: format!("width: {}; height: 100%; border-radius: 3px; transition: width 0.3s ease; {}", progress_width, bar_bg),
-                }
-            }
-        }
-    }
-}
-
-/// Render an extraction item
-fn render_extraction_item(name: &str, progress: u32) -> Element {
-    let is_done = progress >= 100;
-    let status = if is_done { "Done" } else { "Extracting..." };
-
-    let icon_style = if is_done {
-        "background: #22c55e; color: white;"
-    } else {
-        "border: 2px solid #8b5cf6; border-top-color: transparent; animation: spin 1s linear infinite;"
-    };
-
-    let status_color = if is_done {
-        "color: #22c55e;"
-    } else {
-        "color: #8b5cf6;"
-    };
-
-    rsx! {
-        div {
-            style: "display: flex; align-items: center; gap: 12px; padding: 10px; background: rgba(0, 0, 0, 0.3); border-radius: 8px;",
-
-            div {
-                style: format!("width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; {}", icon_style),
-                if is_done { "✓" } else { "" }
-            }
-
-            span {
-                style: "font-size: 13px; color: #e5e7eb; flex: 1;",
-                "{name}"
-            }
-
-            span {
-                style: format!("font-size: 11px; font-weight: 500; {}", status_color),
-                "{status}"
-            }
-        }
-    }
 }
 
 /// Render a log item

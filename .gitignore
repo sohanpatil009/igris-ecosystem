@@ -23,3 +23,6 @@ Thumbs.db
 
 # External repos / demo projects
 friday-tony-stark-demo/
+
+# Knowledge-graph tooling output
+graphify-out/

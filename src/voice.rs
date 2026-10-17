@@ -16,6 +16,34 @@ use crate::processor::process_voice_command;
 use crate::tools::{refresh_running_apps, cleanup_and_exit};
 
 pub async fn start_voice_assistant() {
+    // Install the igris-ai host bridge before any engine reads config or
+    // plugins (idempotent via OnceLock; later calls are no-ops).
+    igris_ai::bridge::install(
+        igris_ai::bridge::HostConfig {
+            speaker_id: || crate::config::CONFIG.speaker_id(),
+            assistant_name: || crate::config::CONFIG.assistant_name(),
+            personality: || crate::config::CONFIG.get().personality,
+        },
+        || {
+            igrisecosystem::plugins::get_all_plugins()
+                .into_iter()
+                .map(|p| igris_ai::bridge::PluginSnapshot {
+                    name: p.metadata.name.clone(),
+                    keywords: p.metadata.keywords.clone(),
+                    commands: p
+                        .commands
+                        .iter()
+                        .map(|c| igris_ai::bridge::PluginCommandSnapshot {
+                            trigger: c.trigger.clone(),
+                            action_type: c.action_type.to_string(),
+                            examples: c.examples.clone(),
+                        })
+                        .collect(),
+                })
+                .collect()
+        },
+    );
+
     // Initialize
     update_status("Initializing...");
     add_log("Starting speech recognition engine...", LogLevel::Info);

@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use crate::eco::discovery::{DiscoveredEcoDevice, ECO_NETWORK_DEVICES};
 use crate::eco::pairing;
+use super::theme::Theme;
 
 #[component]
 pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
@@ -12,61 +13,59 @@ pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
 
     let css = format!(r#"
         .ed-card {{
-            position: relative; padding: 20px; border-radius: 4px; margin-bottom: 12px;
-            background: linear-gradient(135deg, rgba(8,12,28,0.85), rgba(4,8,18,0.9));
-            border: 1px solid rgba(255,255,255,0.06); transition: all 0.3s ease; overflow: hidden;
+            position: relative; padding: 20px; border-radius: {radius}; margin-bottom: 12px;
+            background: linear-gradient(135deg, {raised}, {base});
+            border: 1px solid {border}; transition: border-color 0.2s ease; overflow: hidden;
         }}
         .ed-card::before {{
             content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
             background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
         }}
-        .ed-card:hover {{ border-color: rgba({accent_rgb},0.25); }}
-        .ed-empty {{ color: rgba(255,255,255,0.25); font-size: 12px; padding: 48px 0; text-align: center; font-family: monospace; }}
-        .ed-scanline {{
-            position: relative; overflow: hidden;
-        }}
+        .ed-card:hover {{ border-color: rgba({accent},0.25); }}
+        .ed-empty {{ color: {muted}; font-size: 12px; padding: 48px 0; text-align: center; font-family: monospace; }}
+        .ed-scanline {{ position: relative; overflow: hidden; }}
         .ed-scanline::after {{
             content: ''; position: absolute; top: 0; left: -100%; width: 100%; height: 100%;
-            background: linear-gradient(90deg, transparent, rgba({accent_rgb},0.04), transparent);
-            animation: scan 4s ease-in-out infinite;
-        }}
-        @keyframes scan {{
-            0% {{ left: -100%; }}
-            100% {{ left: 200%; }}
-        }}
-        @keyframes pulse-dot {{
-            0%, 100% {{ opacity: 0.4; transform: scale(1); }}
-            50% {{ opacity: 1; transform: scale(1.3); }}
-        }}
-        @keyframes fadeIn {{
-            from {{ opacity: 0; transform: translateY(10px); }}
-            to {{ opacity: 1; transform: translateY(0); }}
+            background: linear-gradient(90deg, transparent, rgba({accent},0.04), transparent);
+            animation: igris-scan 4s ease-in-out infinite;
         }}
         .ed-device-card {{
-            animation: fadeIn 0.4s ease-out;
-            position: relative; padding: 16px 20px; border-radius: 4px; margin-bottom: 8px;
+            animation: igris-fade-in 0.3s ease-out;
+            position: relative; padding: 16px 20px; border-radius: {radius}; margin-bottom: 8px;
             background: linear-gradient(135deg, rgba(12,16,32,0.9), rgba(6,10,20,0.95));
-            border: 1px solid rgba(255,255,255,0.06);
-            transition: all 0.3s ease; display: flex; align-items: center; gap: 16px;
+            border: 1px solid {border};
+            transition: border-color 0.2s ease; display: flex; align-items: center; gap: 16px;
         }}
-        .ed-device-card:hover {{ border-color: rgba({accent_rgb},0.2); }}
+        .ed-device-card:hover {{ border-color: rgba({accent},0.2); }}
         .ed-btn {{
-            padding: 6px 16px; border-radius: 4px; font-size: 11px; font-weight: 600;
-            letter-spacing: 1px; cursor: pointer; transition: all 0.3s ease;
+            padding: 6px 16px; border-radius: {radius_sm}; font-size: 11px; font-weight: 600;
+            letter-spacing: 1px; cursor: pointer; transition: background-color 0.2s ease, border-color 0.2s ease;
             font-family: 'JetBrains Mono', monospace; border: 1px solid transparent;
+            touch-action: manipulation;
         }}
+        .ed-btn:focus-visible {{ outline: 2px solid {signal}; outline-offset: 2px; }}
         .ed-btn-link {{
-            background: rgba({accent_rgb},0.15); color: rgba({accent_rgb},0.9);
-            border-color: rgba({accent_rgb},0.3);
+            background: rgba({accent},0.15); color: rgba({accent},0.9);
+            border-color: rgba({accent},0.3);
         }}
-        .ed-btn-link:hover {{ background: rgba({accent_rgb},0.25); }}
+        .ed-btn-link:hover {{ background: rgba({accent},0.25); }}
         .ed-btn-unlink {{
-            background: rgba(239,68,68,0.15); color: #ef4444;
-            border-color: rgba(239,68,68,0.3);
+            background: rgba(251,113,133,0.15); color: {danger};
+            border-color: rgba(251,113,133,0.3);
         }}
-        .ed-btn-unlink:hover {{ background: rgba(239,68,68,0.25); }}
-        .ed-status-msg {{ font-size: 11px; color: rgba(255,255,255,0.4); margin-top: 8px; font-family: monospace; }}
-    "#, accent_rgb = accent_rgb);
+        .ed-btn-unlink:hover {{ background: rgba(251,113,133,0.25); }}
+        .ed-status-msg {{ font-size: 11px; color: {secondary}; margin-top: 8px; font-family: monospace; }}
+    "#,
+        radius = Theme::RADIUS_MD,
+        radius_sm = Theme::RADIUS_SM,
+        raised = Theme::BG_RAISED,
+        base = Theme::BG_BASE,
+        border = Theme::BORDER,
+        muted = Theme::TEXT_MUTED,
+        secondary = Theme::TEXT_SECONDARY,
+        signal = Theme::SIGNAL,
+        danger = Theme::DANGER,
+        accent = accent_rgb);
 
     // Poll discovered devices
     use_effect(move || {
@@ -174,36 +173,40 @@ pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
     };
 
     rsx! {
-        div { style: format!("padding: 24px 32px; height: 100%; overflow-y: auto;"),
+        section {
+            aria_label: "Devices",
+            style: format!("padding: 24px 32px; height: 100%; overflow-y: auto;"),
             style { "{css}" }
 
-            div { style: format!("font-size: 14px; font-weight: 700; color: {}; letter-spacing: 2px; font-family: 'JetBrains Mono', monospace; margin-bottom: 24px;", primary_color),
+            h2 { class: "igris-heading", style: format!("font-size: 14px; font-weight: 700; color: {}; letter-spacing: 2px; font-family: 'JetBrains Mono', monospace; margin-bottom: 24px;", primary_color),
                 "// ECOSYSTEM NODES"
             }
 
             // THIS STATION card
             div { class: "ed-card ed-scanline",
                 div { style: "display: flex; align-items: center; gap: 16px;",
-                    div { style: format!("width: 40px; height: 40px; border-radius: 50%; border: 1px solid rgba({}, 0.3); display: flex; align-items: center; justify-content: center; flex-shrink: 0;", accent_rgb),
-                        div { style: format!("width: 8px; height: 8px; border-radius: 50%; background: {}; box-shadow: 0 0 12px {}; animation: pulse-dot 1.5s ease-in-out infinite;", primary_color, primary_color) }
+                    div { aria_hidden: "true", style: format!("width: 40px; height: 40px; border-radius: 50%; border: 1px solid rgba({}, 0.3); display: flex; align-items: center; justify-content: center; flex-shrink: 0;", accent_rgb),
+                        div { style: format!("width: 8px; height: 8px; border-radius: 50%; background: {}; box-shadow: 0 0 12px {}; animation: igris-pulse-dot 1.5s ease-in-out infinite;", primary_color, primary_color) }
                     }
-                    div { style: "flex: 1;",
-                        div { style: "font-size: 16px; font-weight: 600; color: #e5e7eb; font-family: 'JetBrains Mono', monospace;",
+                    div { style: "flex: 1; min-width: 0;",
+                        div { class: "igris-truncate", style: "font-size: 16px; font-weight: 600; color: #e5e7eb; font-family: 'JetBrains Mono', monospace;",
                             "THIS STATION"
                         }
-                        div { style: "font-size: 11px; color: rgba(255,255,255,0.3); margin-top: 4px; font-family: monospace;",
+                        div { class: "igris-truncate igris-num", style: "font-size: 11px; color: rgba(255,255,255,0.3); margin-top: 4px; font-family: monospace;",
                             "Clipboard sync :: ONLINE  ||  Port 53327/53328"
                         }
                     }
-                    span { style: "padding: 2px 10px; border-radius: 4px; font-size: 9px; letter-spacing: 1px; background: rgba(34,197,94,0.12); color: #22c55e; font-family: monospace; border: 1px solid rgba(34,197,94,0.2);", "ACTIVE" }
+                    span { style: "padding: 2px 10px; border-radius: 4px; font-size: 9px; letter-spacing: 1px; background: rgba(163,230,53,0.12); color: #A3E635; font-family: monospace; border: 1px solid rgba(163,230,53,0.2);", "ACTIVE" }
                 }
             }
 
             // Discovered devices list
             div { style: "margin-top: 16px;",
-                div { style: format!("font-size: 11px; font-weight: 600; color: rgba(255,255,255,0.4); letter-spacing: 2px; font-family: 'JetBrains Mono', monospace; margin-bottom: 12px;"),
+                div {
+                    aria_live: "polite",
+                    style: format!("font-size: 11px; font-weight: 600; color: rgba(255,255,255,0.4); letter-spacing: 2px; font-family: 'JetBrains Mono', monospace; margin-bottom: 12px;"),
                     if is_scanning() {
-                        "// SCANNING NETWORK ..."
+                        "// SCANNING NETWORK…"
                     } else {
                         {
                             let peer_count = devices().len();
@@ -213,9 +216,9 @@ pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
                 }
 
                 if devices().is_empty() && !is_scanning() {
-                    div { class: "ed-empty",
+                    div { class: "ed-empty", role: "status",
                         div { style: "font-size: 12px; margin-bottom: 8px; color: rgba(255,255,255,0.3);",
-                            "<NO_PEERS>"
+                            "No peers found"
                         }
                         div { style: "font-size: 11px; color: rgba(255,255,255,0.15);",
                             "Devices with IGRIS running will appear here automatically"
@@ -226,24 +229,24 @@ pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
                 for dev in devices().iter() {
                     div { class: "ed-device-card", key: "{dev.id}",
                         // Status dot
-                        div { style: format!("width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; animation: {};",
-                            if dev.is_online { format!("pulse-dot 2s ease-in-out infinite; background: #22c55e; box-shadow: 0 0 8px #22c55e") }
+                        div { aria_hidden: "true", style: format!("width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; animation: {};",
+                            if dev.is_online { format!("igris-pulse-dot 2s ease-in-out infinite; background: #A3E635; box-shadow: 0 0 8px #A3E635") }
                             else { "background: rgba(255,255,255,0.15)".to_string() }
                         )}
 
                         // Device info
                         div { style: "flex: 1; min-width: 0;",
-                            div { style: "display: flex; align-items: center; gap: 8px;",
-                                div { style: "font-size: 14px; font-weight: 600; color: #e5e7eb; font-family: 'JetBrains Mono', monospace;",
+                            div { style: "display: flex; align-items: center; gap: 8px; min-width: 0;",
+                                div { class: "igris-truncate", style: "font-size: 14px; font-weight: 600; color: #e5e7eb; font-family: 'JetBrains Mono', monospace;",
                                     "{dev.name}"
                                 }
                                 if dev.is_trusted {
-                                    span { style: "padding: 1px 8px; border-radius: 4px; font-size: 9px; letter-spacing: 1px; background: rgba(34,197,94,0.12); color: #22c55e; font-family: monospace; border: 1px solid rgba(34,197,94,0.2);",
+                                    span { style: "padding: 1px 8px; border-radius: 4px; font-size: 9px; letter-spacing: 1px; background: rgba(163,230,53,0.12); color: #A3E635; font-family: monospace; border: 1px solid rgba(163,230,53,0.2);",
                                         "LINKED"
                                     }
                                 }
                             }
-                            div { style: "font-size: 10px; color: rgba(255,255,255,0.25); margin-top: 2px; font-family: monospace;",
+                            div { class: "igris-truncate igris-num", style: "font-size: 10px; color: rgba(255,255,255,0.25); margin-top: 2px; font-family: monospace;",
                                 "{dev.hostname}  ::  {dev.ip}:{dev.port}"
                             }
                         }
@@ -251,7 +254,8 @@ pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
                         // Link / Unlink button
                         if dev.is_trusted {
                             button {
-                                class: "ed-btn ed-btn-unlink",
+                                class: "ed-btn ed-btn-unlink igris-btn igris-focus",
+                                aria_label: "Unlink {dev.name}",
                                 onclick: {
                                     let d = dev.clone();
                                     move |_| do_unlink(d.clone())
@@ -260,7 +264,8 @@ pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
                             }
                         } else {
                             button {
-                                class: "ed-btn ed-btn-link",
+                                class: "ed-btn ed-btn-link igris-btn igris-focus",
+                                aria_label: "Link {dev.name}",
                                 onclick: {
                                     let d = dev.clone();
                                     move |_| do_link(d.clone())
@@ -274,7 +279,7 @@ pub fn EcoDevicePanel(primary_color: String, accent_rgb: String) -> Element {
 
             // Status message
             if !pairing_status().is_empty() {
-                div { style: format!("margin-top: 12px; padding: 10px 16px; border-radius: 4px; font-size: 11px; font-family: monospace; color: rgba(255,255,255,0.6); background: rgba({}, 0.08); border: 1px solid rgba({}, 0.15);", accent_rgb, accent_rgb),
+                div { role: "status", aria_live: "polite", style: format!("margin-top: 12px; padding: 10px 16px; border-radius: 4px; font-size: 11px; font-family: monospace; color: rgba(255,255,255,0.6); background: rgba({}, 0.08); border: 1px solid rgba({}, 0.15);", accent_rgb, accent_rgb),
                     "{pairing_status}"
                 }
             }

@@ -37,9 +37,8 @@ lazy_static = "1.4"
 # Voice assistant / GUI
 dioxus = { version = "0.7", features = ["desktop"] }
 dioxus-desktop = "0.7"
-sherpa-onnx = "1.11"
-cpal = "0.16"
-rodio = "0.17"
+igris-ai = { path = "../igris-ai" }
+igris-protocol = { path = "../igris-protocol" }
 regex = "1.10"
 urlencoding = "2.1"
 image = { version = "0.24", features = ["jpeg", "png"] }
@@ -50,13 +49,10 @@ zip = "0.6"
 rfd = "0.15"
 async-std = "1.12"
 fuzzy-matcher = "0.3"
-num-complex = "0.4"
-rustfft = "6.1"
 scraper = "0.20"
-tonic = { version = "0.12", features = ["tls", "tls-roots"] }
-prost = "0.13"
-prost-types = "0.13"
 dotenv = "0.15"
+cpal = "0.16"
+rodio = "0.17"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["processthreadsapi", "winnt", "winuser", "winsock2", "ws2def", "handleapi", "processenv", "fileapi", "winbase"] }
@@ -67,6 +63,9 @@ windows = { version = "0.60", features = [
     "Win32_Media",
     "Win32_System_Power",
     "Win32_System_Threading",
+    "Win32_System_WinRT",
+    "ApplicationModel_Calls",
+    "Foundation",
 ] }
 winrt-toast-reborn = "0.3"
 
@@ -79,8 +78,6 @@ core-graphics = "0.24"
 
 [build-dependencies]
 embed-resource = "1.8"
-tonic-build = "0.12"
-protoc-bin-vendored = "3.0"
 
 [lib]
 name = "igrisecosystem"
@@ -92,4 +89,5 @@ path = "src/main.rs"
 
 [features]
 default = []
-with_riva = []
+# Forwarded to igris-ai: NVIDIA Riva online STT client generation.
+with_riva = ["igris-ai/with_riva"]

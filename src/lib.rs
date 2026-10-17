@@ -15,11 +15,9 @@ pub mod config;
 // UI components
 pub mod ui;
 
-// Core voice processing modules
-pub mod core;
+// Core voice processing modules — moved to the igris-ai crate; re-exported below.
 
-// Natural language understanding
-pub mod nlu;
+// Natural language understanding — moved to igris-ai; re-exported below.
 
 // Command handlers
 pub mod commands;
@@ -40,14 +38,12 @@ pub mod setup_manager;
 // Media capture (camera, video)
 pub mod media;
 
-// FastSwap file sharing integration
-pub mod fastswap;
+// FastSwap file sharing integration — shared with the phone via igris-protocol.
+pub use igris_protocol::fastswap;
 
-// Online mode (NVIDIA NIM API-based STT & Reasoning)
-pub mod online;
-
-// Desktop Ecosystem (cross-device clipboard, discovery, sync)
-pub mod eco;
+// Desktop Ecosystem (cross-device clipboard, discovery, sync) — single source
+// of truth in igris-protocol (phone + desktop consume the identical tree).
+pub use igris_protocol::eco;
 
 // Global state for search results UI (shared across modules)
 #[derive(Clone, Debug, Default)]
@@ -112,44 +108,17 @@ pub fn time_aware_greeting() -> String {
     }
 }
 
-// Selected model for chat
-pub static SELECTED_MODEL: once_cell::sync::Lazy<Arc<Mutex<String>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(
-        std::env::var("NVIDIA_NIM_MODEL").unwrap_or_else(|_| "meta/llama-3.1-70b-instruct".to_string())
-    )));
+// Assistant brain lives in the igris-ai crate (voice assistant extraction);
+// these re-exports keep every existing `igrisecosystem::*` path working.
+pub use igris_ai::{core, nlu, online};
 
-pub fn set_selected_model(model: &str) {
-    if let Ok(mut m) = SELECTED_MODEL.lock() {
-        *m = model.to_string();
-    }
-}
-
-pub fn get_selected_model() -> String {
-    SELECTED_MODEL.lock().map(|m| m.clone()).unwrap_or_default()
-}
-
-// Selected provider (nvidia, openai, groq, google)
-pub static SELECTED_PROVIDER: once_cell::sync::Lazy<Arc<Mutex<String>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new("nvidia".to_string())));
-
-pub fn set_selected_provider(provider: &str) {
-    if let Ok(mut p) = SELECTED_PROVIDER.lock() {
-        *p = provider.to_string();
-    }
-}
-
-pub fn get_selected_provider() -> String {
-    SELECTED_PROVIDER.lock().map(|p| p.clone()).unwrap_or_else(|_| "nvidia".to_string())
-}
-
-// Reset flag - set by global hotkey to restart voice loop from wake word detection
-pub static RESET_FLAG: AtomicBool = AtomicBool::new(false);
-
-// Force listen flag - set by global hotkey to skip wake word and enter continuous listening mode directly
-pub static FORCE_LISTEN: AtomicBool = AtomicBool::new(false);
-
-// TTS playing flag - set while TTS audio is playing, suppresses mic input to prevent feedback loop
-pub static TTS_PLAYING: AtomicBool = AtomicBool::new(false);
+// Companion shell re-exports of the moved control state.
+pub use igris_ai::{
+    SELECTED_MODEL, SELECTED_PROVIDER,
+    set_selected_model, get_selected_model,
+    set_selected_provider, get_selected_provider,
+    RESET_FLAG, FORCE_LISTEN, TTS_PLAYING,
+};
 
 // Re-export camera panel state from commands module
 pub use commands::ffmpeg_camera::{CameraPanelState, CAMERA_PANEL_STATE};

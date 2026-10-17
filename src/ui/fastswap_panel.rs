@@ -538,7 +538,7 @@ async fn send_files_to_device(
         .to_string();
 
     let local_device = {
-        let mut dev = {
+        let dev = {
             let guard = crate::fastswap::FASTSWAP_DEVICE.lock().unwrap();
             guard.clone()
         };
@@ -569,8 +569,15 @@ async fn send_files_to_device(
     
     status_message.set(format!("Sending files to {}...", device.alias));
     
+    // Generate a unique transfer session id up-front (now owned by the
+    // caller so the UI and progress tracker reference the same session).
+    let local_session_id = uuid::Uuid::new_v4().to_string();
+
     // Send files
-    match client.send_files(&device, files.clone(), relative_dirs, &local_device).await {
+    match client
+        .send_files(&device, files.clone(), relative_dirs, &local_device, local_session_id)
+        .await
+    {
         Ok(session_id) => {
             current_session.set(Some(session_id.clone()));
             status_message.set(format!("Transferring {} file(s) to {}...", files.len(), device.alias));

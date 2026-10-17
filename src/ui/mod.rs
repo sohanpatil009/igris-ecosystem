@@ -11,6 +11,8 @@ pub mod system_info_panel;
 pub mod eco_device_panel;
 pub mod chat_panel;
 pub mod notification_panel;
+pub mod theme;
+pub mod calls_panel;
 
 pub use settings::{SettingsPanel, SettingsButton};
 pub use search_results::{SearchResultsPanel, SearchResultItem};
@@ -25,3 +27,5 @@ pub use system_info_panel::SystemInfoPanel;
 pub use eco_device_panel::EcoDevicePanel;
 pub use chat_panel::ChatPanel;
 pub use notification_panel::NotificationPanel;
+pub use theme::Theme;
+pub use calls_panel::CallsPanel;

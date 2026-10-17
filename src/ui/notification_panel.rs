@@ -4,18 +4,21 @@ use crate::eco::notification::{NotificationData, get_notifications};
 #[component]
 pub fn NotificationPanel(primary_color: String, accent_rgb: String) -> Element {
     let mut notifications = use_signal(|| Vec::<NotificationData>::new());
+    let mut sms_list = use_signal(|| Vec::<crate::eco::sms::SmsData>::new());
     let mut reply_texts = use_signal(|| std::collections::HashMap::<String, String>::new());
     let mut sending = use_signal(|| String::new());
+    let mut reply_status = use_signal(|| std::collections::HashMap::<String, String>::new());
 
     let notif_count = notifications().len();
     let notif_header = format!("{} notifications  ||  Syncing from linked devices", notif_count);
 
-    // Poll notifications
+    // Poll notifications + SMS (SMS surfaces in the notification stream).
     use_effect(move || {
         spawn(async move {
             loop {
                 let notifs = get_notifications();
                 notifications.set(notifs);
+                sms_list.set(crate::eco::sms::get_sms());
                 async_std::task::sleep(std::time::Duration::from_secs(2)).await;
             }
         });
@@ -63,22 +66,38 @@ pub fn NotificationPanel(primary_color: String, accent_rgb: String) -> Element {
         }}
     "#, accent_rgb = accent_rgb, primary_color = primary_color);
 
-    let mut do_reply = move |notif_id: String| {
+    let do_reply = move |notif_id: String| {
         let text = reply_texts.with(|m| m.get(&notif_id).cloned().unwrap_or_default());
         if text.trim().is_empty() {
             return;
         }
         let notif_id_clone = notif_id.clone();
         sending.set(notif_id.clone());
+        reply_status.write().remove(&notif_id);
         spawn(async move {
-            // Send reply via eco manager
-            if let Ok(mut guard) = crate::eco::manager::ECO_MANAGER.lock() {
+            // Send reply via eco manager; surface failures instead of
+            // swallowing them (a failed reply looks identical to success
+            // otherwise — the exact bug behind "hi never arrived").
+            let result = if let Ok(mut guard) = crate::eco::manager::ECO_MANAGER.lock() {
                 if let Some(ref mut manager) = *guard {
-                    let _ = manager.reply_to_notification(&notif_id_clone, &text).await;
+                    manager.reply_to_notification(&notif_id_clone, &text).await
+                        .map(|_| "Sent ✓".to_string())
+                        .map_err(|e| e.to_string())
+                } else {
+                    Err("Mesh not initialized".to_string())
+                }
+            } else {
+                Err("Mesh lock failed".to_string())
+            };
+            match result {
+                Ok(msg) => {
+                    reply_texts.write().remove(&notif_id);
+                    reply_status.write().insert(notif_id.clone(), msg);
+                }
+                Err(err) => {
+                    reply_status.write().insert(notif_id.clone(), format!("Failed: {}", err));
                 }
             }
-            // Clear the input
-            reply_texts.write().remove(&notif_id);
             sending.set(String::new());
         });
     };
@@ -117,13 +136,36 @@ pub fn NotificationPanel(primary_color: String, accent_rgb: String) -> Element {
                     }
                 }
 
-                if notifications().is_empty() {
+                if notifications().is_empty() && sms_list().is_empty() {
                     div { class: "np-empty",
                         div { style: "font-size: 12px; margin-bottom: 8px; color: rgba(255,255,255,0.3);",
-                            "<NO_NOTIFICATIONS>"
+                            "No notifications"
                         }
                         div { style: "font-size: 11px; color: rgba(255,255,255,0.15);",
-                            "Notifications from linked devices will appear here"
+                            "Notifications and SMS from linked devices will appear here"
+                        }
+                    }
+                }
+
+                // SMS lives in the notification stream (same language as mobile).
+                for msg in sms_list().iter() {
+                    div {
+                        class: "np-notif-item",
+                        key: "sms-{msg.sms_id}",
+                        style: "border-left: 2px solid #22D3EE;",
+                        div { style: "display: flex; align-items: center; gap: 8px; margin-bottom: 8px;",
+                            span { style: "font-size: 9px; letter-spacing: 2px; color: #22D3EE; font-family: monospace;",
+                                "SMS"
+                            }
+                            span { class: "igris-truncate", style: "font-size: 12px; font-weight: 600; color: #e5e7eb;",
+                                "{msg.address}"
+                            }
+                            span { style: "font-size: 10px; color: rgba(255,255,255,0.25); font-family: monospace;",
+                                "from {msg.device_name}"
+                            }
+                        }
+                        div { style: "font-size: 13px; color: #e5e7eb; overflow-wrap: break-word;",
+                            "{msg.body}"
                         }
                     }
                 }
@@ -229,17 +271,37 @@ pub fn NotificationPanel(primary_color: String, accent_rgb: String) -> Element {
                                         reply_texts.write().insert(notif_id.clone(), e.value());
                                     }
                                 },
-                                placeholder: "Type reply...",
+                                onkeydown: {
+                                    let notif_id = notif.id.clone();
+                                    let mut do_reply = do_reply.clone();
+                                    move |e: Event<KeyboardData>| {
+                                        if e.key() == Key::Enter {
+                                            do_reply(notif_id.clone())
+                                        }
+                                    }
+                                },
+                                placeholder: "Type reply…",
+                                aria_label: "Reply text",
                                 disabled: sending() == notif.id,
                             }
                             button {
-                                class: "np-reply-btn",
+                                class: "np-reply-btn igris-focus",
+                                aria_label: "Send reply",
                                 disabled: sending() == notif.id,
                                 onclick: {
                                     let notif_id = notif.id.clone();
+                                    let mut do_reply = do_reply.clone();
                                     move |_| do_reply(notif_id.clone())
                                 },
-                                if sending() == notif.id { "..." } else { ">>" }
+                                if sending() == notif.id { "…" } else { ">>" }
+                            }
+                        }
+                        if let Some(status) = reply_status.with(|m| m.get(&notif.id).cloned()) {
+                            div {
+                                role: "status",
+                                style: format!("font-size: 11px; font-family: monospace; margin-top: 6px; color: {};",
+                                    if status.starts_with("Sent") { "#A3E635" } else { "#FB7185" }),
+                                "{status}"
                             }
                         }
                     }

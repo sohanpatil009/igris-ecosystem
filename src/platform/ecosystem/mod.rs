@@ -4,14 +4,17 @@ pub mod macos;
 pub mod windows;
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod calls;
+pub mod audio;
 pub mod notifications;
 
-use crate::eco::errors::EcoResult;
-
-pub trait PlatformClipboard: Send + Sync {
-    fn get_text(&self) -> EcoResult<String>;
-    fn set_text(&self, text: &str) -> EcoResult<()>;
-}
+// The platform seam (traits, phonebook stub, contact entry) has a single
+// source of truth in igris-protocol — the desktop tree above implements
+// those same traits for the three desktop OSes.
+pub use igris_protocol::platform::ecosystem::{
+    ContactEntry, PlatformClipboard, PlatformContacts, contacts_search,
+    set_contacts_provider,
+};
 
 pub fn create_platform_clipboard() -> Box<dyn PlatformClipboard> {
     #[cfg(target_os = "macos")]

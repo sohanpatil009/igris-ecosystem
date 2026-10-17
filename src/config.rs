@@ -1,4 +1,4 @@
-// src/config.rs - Configuration System for IGRIS
+﻿// src/config.rs - Configuration System for IGRIS
 // Handles loading, saving, and managing user settings
 
 use serde::{Deserialize, Serialize};
@@ -9,98 +9,13 @@ use std::sync::{Arc, RwLock};
 /// Configuration file path
 const CONFIG_PATH: &str = "./pkg/config.json";
 
-/// Assistant personality presets
-#[derive(Debug, Clone, PartialEq)]
-pub enum Personality {
-    Igris,
-    Alita,
-    Custom(String),
-}
+// Assistant personality presets â€” the enum (and persona texts) live in the
+// igris-ai crate's host bridge; re-exported here so every existing
+// `config::Personality` path keeps working.
+pub use igris_ai::bridge::Personality;
 
-// Custom serialization to handle simple string format in config
-impl Serialize for Personality {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            Personality::Igris => serializer.serialize_str("Igris"),
-            Personality::Alita => serializer.serialize_str("Alita"),
-            Personality::Custom(name) => serializer.serialize_str(name),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Personality {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "Igris" => Ok(Personality::Igris),
-            "Alita" => Ok(Personality::Alita),
-            other => Ok(Personality::Custom(other.to_string())),
-        }
-    }
-}
-
-impl Default for Personality {
-    fn default() -> Self {
-        Personality::Igris
-    }
-}
-
-impl Personality {
-    pub fn name(&self) -> &str {
-        match self {
-            Personality::Igris => "IGRIS",
-            Personality::Alita => "Alita",
-            Personality::Custom(name) => name,
-        }
-    }
-    
-    pub fn speaker_id(&self) -> &str {
-        match self {
-            Personality::Igris => "051",  // Deep male voice
-            Personality::Alita => "001",  // Female voice
-            Personality::Custom(_) => "051",
-        }
-    }
-    
-    pub fn wake_word(&self) -> &str {
-        match self {
-            Personality::Igris => "hello",
-            Personality::Alita => "alita",
-            Personality::Custom(_) => "hello",
-        }
-    }
-    
-    /// Get all wake word variations for this personality
-    pub fn wake_word_variations(&self) -> Vec<&str> {
-        match self {
-            Personality::Igris => vec!["hello", "hello igris", "hi igris", "igris"],
-            Personality::Alita => vec!["alita", "hello alita", "hi alita", "hello"],
-            Personality::Custom(_) => vec!["hello"],
-        }
-    }
-    
-    pub fn greeting(&self) -> &str {
-        match self {
-            Personality::Igris => "IGRIS at your service master. Say hello when you need me.",
-            Personality::Alita => "Hey! Alita here. Just say hello when you need me!",
-            Personality::Custom(name) => name,
-        }
-    }
-    
-    pub fn invoke_response(&self) -> &str {
-        match self {
-            Personality::Igris => "Yes, I'm listening. What can I do for you?",
-            Personality::Alita => "Hey! What's up? How can I help?",
-            Personality::Custom(_) => "I'm listening.",
-        }
-    }
-}
+// Custom serialization to handle simple string format in config lives with
+// the moved enum (igris_ai::bridge::Personality).
 
 /// Voice recognition settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,37 +170,37 @@ impl AppConfig {
     pub fn load() -> Self {
         let path = PathBuf::from(CONFIG_PATH);
         
-        println!("📁 Loading config from: {}", path.display());
-        println!("📁 Current dir: {:?}", std::env::current_dir());
+        println!("ðŸ“ Loading config from: {}", path.display());
+        println!("ðŸ“ Current dir: {:?}", std::env::current_dir());
         
         if path.exists() {
             match fs::read_to_string(&path) {
                 Ok(content) => {
-                    println!("📄 Config file content length: {} bytes", content.len());
+                    println!("ðŸ“„ Config file content length: {} bytes", content.len());
                     match serde_json::from_str(&content) {
                         Ok(config) => {
                             let cfg: AppConfig = config;
-                            println!("✅ Configuration loaded - Personality: {:?}", cfg.personality);
+                            println!("âœ… Configuration loaded - Personality: {:?}", cfg.personality);
                             return cfg;
                         }
                         Err(e) => {
-                            eprintln!("⚠️ Failed to parse config: {}, using defaults", e);
+                            eprintln!("âš ï¸ Failed to parse config: {}, using defaults", e);
                             eprintln!("   Content: {}", &content[..content.len().min(200)]);
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("⚠️ Failed to read config: {}, using defaults", e);
+                    eprintln!("âš ï¸ Failed to read config: {}, using defaults", e);
                 }
             }
         } else {
-            println!("📁 Config file not found at {}, creating default", path.display());
+            println!("ðŸ“ Config file not found at {}, creating default", path.display());
         }
         
         // Create default config
         let config = AppConfig::default();
         let _ = config.save();
-        println!("✅ Created default config - Personality: {:?}", config.personality);
+        println!("âœ… Created default config - Personality: {:?}", config.personality);
         config
     }
     
@@ -302,7 +217,7 @@ impl AppConfig {
         fs::write(CONFIG_PATH, json)
             .map_err(|e| format!("Failed to write config: {}", e))?;
         
-        println!("✅ Configuration saved to {}", CONFIG_PATH);
+        println!("âœ… Configuration saved to {}", CONFIG_PATH);
         Ok(())
     }
     

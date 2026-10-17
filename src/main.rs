@@ -13,7 +13,7 @@ use dioxus::prelude::*;
 use igrisecosystem::eco;
 use dioxus::desktop::{Config, WindowBuilder};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use tokio::sync::mpsc;
 
@@ -29,7 +29,7 @@ use igrisecosystem::ui::{
     SettingsPanel, MenuButton, SearchResultsPanel, SearchResultItem,
     CameraPanel, PresentationPanel, FastSwapPanel, IncomingTransferPopup,
     Sidebar, Tab, AlarmReminderPanel, SystemInfoPanel, EcoDevicePanel, ChatPanel,
-    NotificationPanel,
+    NotificationPanel, Theme, CallsPanel,
 };
 use igrisecosystem::commands::ffmpeg_camera::{CameraPanelState, CAMERA_PANEL_STATE};
 
@@ -47,11 +47,11 @@ fn main() {
     }
 
     thread::spawn(|| {
-        start_setup_and_assistant();
+        start_eco_only();
     });
 
     let window = WindowBuilder::new()
-        .with_title("IGRIS Voice Assistant")
+        .with_title("IGRIS")
         .with_visible(true)
         .with_inner_size(dioxus::desktop::tao::dpi::LogicalSize::new(1100.0, 700.0))
         .with_window_icon(Some(load_icon()));
@@ -76,13 +76,39 @@ fn load_icon() -> dioxus::desktop::tao::window::Icon {
         .expect("Failed to create icon")
 }
 
-fn start_setup_and_assistant() {
+/// Mesh-first launch: eco (discovery + clipboard/notification/calls/SMS +
+/// FastSwap) starts immediately with no downloads. The heavy voice/AI stack
+/// (models, setup, microphone) starts only when the user opens Dashboard/Chat.
+static VOICE_INIT_STARTED: AtomicBool = AtomicBool::new(false);
+
+fn start_eco_only() {
     thread::spawn(|| {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            run_setup_and_assistant().await;
+            run_eco_startup().await;
+            // Keep the runtime (and every server task spawned on it) alive
+            // for the life of the process. Returning here would drop the
+            // runtime and silently kill discovery, sync and FastSwap.
+            futures::future::pending::<()>().await;
         });
     });
+}
+
+/// Called once from the UI when the AI tab is first opened.
+fn start_voice_on_demand() {
+    if VOICE_INIT_STARTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    thread::spawn(|| {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            run_voice_startup().await;
+        });
+    });
+}
+
+fn start_setup_and_assistant() {
+    start_eco_only();
 }
 
 fn startup_log(msg: &str) {
@@ -156,9 +182,137 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
     Ok(())
 }
 
-async fn run_setup_and_assistant() {
+/// Mesh boot: runs at app launch. No downloads, no microphone — the Devices
+/// tab is usable within seconds.
+async fn run_eco_startup() {
     startup_log("\n═══════════════════════════════════════════════════════");
-    startup_log("[LAUNCH] IGRIS v3 - Voice Assistant (Hybrid Offline/Online)");
+    startup_log("[LAUNCH] IGRIS - Device mesh starting");
+    startup_log("═══════════════════════════════════════════════════════\n");
+
+    startup_log("\n[ECO] Initializing device mesh...");
+    let pkg_dir = PathBuf::from("./pkg");
+
+    // Register the desktop platform seams with the shared protocol crate:
+    // the LAN audio engine (cpal/rodio link) and the local Bluetooth
+    // telephony line executor. Unregistered hooks would read "no session".
+    igris_protocol::platform::ecosystem::hooks::set_audio_fns(
+        igrisecosystem::platform::ecosystem::audio::link_up,
+        igrisecosystem::platform::ecosystem::audio::attach,
+        igrisecosystem::platform::ecosystem::audio::detach,
+        igrisecosystem::platform::ecosystem::audio::test_tone_to_phone,
+    );
+    #[cfg(target_os = "windows")]
+    igris_protocol::platform::ecosystem::hooks::set_local_call_action(
+        igrisecosystem::platform::ecosystem::calls::execute_local_action,
+    );
+
+    // FastSwap directories: keep the TLS certs in pkg/certs and received
+    // files landing in the OS Downloads folder (desktop UX), while the
+    // phone injects its app-owned paths on its side.
+    {
+        let downloads = dirs::download_dir()
+            .unwrap_or_else(|| pkg_dir.join("downloads"));
+        igris_protocol::fastswap::set_fastswap_paths(pkg_dir.join("certs"), downloads);
+    }
+
+    match eco::init_eco_manager_async(
+        &pkg_dir,
+        igrisecosystem::platform::ecosystem::create_platform_clipboard(),
+        igrisecosystem::platform::ecosystem::notifications::create_platform_notification(),
+    )
+    .await
+    {
+        Ok(_) => {
+            let config_path = pkg_dir.join("ecosystem/ecosystem_config.json");
+            if let Some(mut guard) = eco::get_eco_manager() {
+                if let Some(ref mut manager) = *guard {
+                    manager.enable_clipboard_sync();
+                    manager.enable_notification_sync();
+                    manager.config_mut().call_sync = true;
+                    manager.config_mut().sms_sync = true;
+                    manager.config_mut().clipboard_media = true;
+                    manager.config_mut().enabled = true;
+                    manager.config_mut().save(&config_path);
+                }
+            }
+            match eco::start_eco_manager_async().await {
+                Ok(_) => {
+                    startup_log("[ECO] Mesh live on ports 53327/53328 (clipboard + notifications + calls/SMS)");
+
+                    // ---- Desktop-only seam wiring (moved out of the shared
+                    // EcoManager::start, which must stay platform-neutral) ----
+                    let event_bus = {
+                        let mut guard = eco::get_eco_manager();
+                        match guard.as_mut().and_then(|m| m.as_mut()) {
+                            Some(manager) => Some(manager.event_bus().clone()),
+                            None => None,
+                        }
+                    };
+                    if let Some(event_bus) = event_bus {
+                        #[cfg(target_os = "windows")]
+                        {
+                            use igrisecosystem::platform::ecosystem::calls;
+
+                            // Local telephony seam: phone-originated rings raise
+                            // the native toast; the desktop's own line uses the
+                            // watcher + poller.
+                            calls::spawn_remote_call_watcher(event_bus.clone());
+                            let seam = calls::create_platform_call();
+                            if seam.is_available() {
+                                calls::set_platform_call(seam);
+                                calls::windows::start_call_watcher();
+                                calls::spawn_local_call_poller(event_bus.clone(), 1500);
+                                startup_log("[ECO] Local telephony seam active (call watcher + poller)");
+                            }
+
+                            // Windows toast + reflection for notifications
+                            // arriving from peers: show native toasts, and
+                            // follow the phone's swipe-away on dismissals.
+                            use igrisecosystem::eco::events::EcoEvent;
+                            let toasts_bus = event_bus.clone();
+                            let toasts_handler = std::sync::Arc::new(move |event: EcoEvent| {
+                                match event {
+                                    EcoEvent::NotificationReceived(notif, from) => {
+                                        if from == "remote" {
+                                            igrisecosystem::platform::ecosystem::notifications::toasts::show_toast(&notif);
+                                        }
+                                    }
+                                    EcoEvent::NotificationDismissed(payload) => {
+                                        igrisecosystem::platform::ecosystem::notifications::toasts::hide_toast(&payload.notification_key);
+                                    }
+                                    _ => {}
+                                }
+                            });
+                            toasts_bus.subscribe(toasts_handler);
+                        }
+                    }
+
+                    // Files must be receivable without opening the File Share
+                    // tab first — a phone sending to this desktop otherwise
+                    // hits refused ports.
+                    crate::fastswap::start_on_demand().await;
+                    startup_log("[ECO] FastSwap live on ports 53317/53318");
+                    let mut state = ASSISTANT_STATE.lock().unwrap();
+                    state.current_status = "Mesh live — open Dashboard for voice".to_string();
+                }
+                Err(e) => startup_log(&format!("[ECO] Start failed: {}", e)),
+            }
+        }
+        Err(e) => startup_log(&format!("[ECO] Init failed: {}", e)),
+    }
+}
+
+/// Voice/AI boot: runs once, only after the user opens Dashboard/Chat.
+/// Contains all downloads (models, LLVM) and the microphone pipeline.
+async fn run_voice_startup() {
+    {
+        let mut state = ASSISTANT_STATE.lock().unwrap();
+        state.setup_in_progress = true;
+        state.current_status = "Starting voice...".to_string();
+    }
+    startup_log("\n[VOICE-INIT] User opened AI tab — starting voice stack");
+    startup_log("\n═══════════════════════════════════════════════════════");
+    startup_log("[VOICE] IGRIS Voice Assistant (Hybrid Offline/Online)");
     startup_log("═══════════════════════════════════════════════════════\n");
 
     startup_log(&format!("[DOTENV] Current dir: {:?}", std::env::current_dir()));
@@ -271,27 +425,6 @@ async fn run_setup_and_assistant() {
     startup_log("[SETUP] setup_ui.run() completed");
     let _ = setup_handle.await;
 
-    startup_log("\n[ECO] Initializing clipboard sync...");
-    let pkg_dir = PathBuf::from("./pkg");
-    match eco::init_eco_manager_async(&pkg_dir).await {
-        Ok(_) => {
-            let config_path = pkg_dir.join("ecosystem/ecosystem_config.json");
-            if let Some(mut guard) = eco::get_eco_manager() {
-                if let Some(ref mut manager) = *guard {
-                    manager.enable_clipboard_sync();
-                    manager.enable_notification_sync();
-                    manager.config_mut().enabled = true;
-                    manager.config_mut().save(&config_path);
-                }
-            }
-            match eco::start_eco_manager_async().await {
-                Ok(_) => startup_log("[ECO] Clipboard + notification sync started on ports 53327/53328"),
-                Err(e) => startup_log(&format!("[ECO] Start failed: {}", e)),
-            }
-        }
-        Err(e) => startup_log(&format!("[ECO] Init failed: {}", e)),
-    }
-
     startup_log("\n[MIC] STEP 4: VOICE ASSISTANT");
     startup_log("─────────────────────────────────────────────────────\n");
 
@@ -299,15 +432,19 @@ async fn run_setup_and_assistant() {
     start_voice_assistant().await;
 }
 
+async fn run_setup_and_assistant() {
+    run_eco_startup().await;
+}
+
 #[component]
 fn App() -> Element {
     let mut update_trigger = use_signal(|| 0);
     let mut is_awake = use_signal(|| false);
-    let mut setup_in_progress = use_signal(|| true);
-    let mut show_setup_gui = use_signal(|| true);
+    let mut setup_in_progress = use_signal(|| false);
+    let mut show_setup_gui = use_signal(|| false);
     let show_settings = use_signal(|| false);
     let mut show_fastswap = use_signal(|| false);
-    let mut status_text = use_signal(|| "Running First-Time Setup...".to_string());
+    let mut status_text = use_signal(|| "Mesh starting...".to_string());
     let mut last_command_text = use_signal(|| "Waiting for voice input...".to_string());
     let mut assistant_name = use_signal(|| CONFIG.assistant_name());
     let mut is_igris = use_signal(|| CONFIG.get().personality == config::Personality::Igris);
@@ -322,7 +459,7 @@ fn App() -> Element {
 
     let mut pending_transfers = use_signal(|| Vec::<fastswap::PendingTransfer>::new());
 
-    let mut current_tab = use_signal(|| Tab::Dashboard);
+    let mut current_tab = use_signal(|| Tab::Devices);
 
     use_effect(move || {
         spawn(async move {
@@ -386,6 +523,23 @@ fn App() -> Element {
                         spawn(async { fastswap::start_on_demand().await });
                     }
                 }
+
+                // On-demand AI: voice stack boots only when its tab opens.
+                let tab = current_tab();
+                if (tab == Tab::Dashboard || tab == Tab::Chat)
+                    && !VOICE_INIT_STARTED.load(Ordering::Relaxed)
+                {
+                    VOICE_INIT_STARTED.store(true, Ordering::Relaxed);
+                    show_setup_gui.set(true);
+                    {
+                        let mut state = ASSISTANT_STATE.lock().unwrap();
+                        state.setup_in_progress = true;
+                        state.current_status = "Starting voice...".to_string();
+                    }
+                    thread::spawn(|| {
+                        start_voice_on_demand();
+                    });
+                }
             }
         });
     });
@@ -423,12 +577,13 @@ fn App() -> Element {
     }).collect();
 
     rsx! {
+        style { "{Theme::base_css()}" }
         style { r#"
             * {{ margin: 0; padding: 0; box-sizing: border-box; }}
             ::-webkit-scrollbar {{ width: 0px; height: 0px; }}
             * {{ scrollbar-width: none; }}
             * {{ -ms-overflow-style: none; }}
-            .color-transition {{ transition: all 0.5s ease-in-out; }}
+            .color-transition {{ transition: color 0.3s ease-in-out, background-color 0.3s ease-in-out, border-color 0.3s ease-in-out; }}
 
             @keyframes spin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }}
             @keyframes pulse {{ 0%, 100% {{ opacity: 0.4; transform: scale(1); }} 50% {{ opacity: 0.8; transform: scale(1.05); }} }}
@@ -481,6 +636,13 @@ fn App() -> Element {
 
         SettingsPanel { is_open: show_settings }
 
+        a {
+            href: "#igris-main",
+            class: "igris-focus",
+            style: "position: absolute; left: -9999px; top: 8px; z-index: 200; background: #22D3EE; color: #050A14; padding: 8px 16px; border-radius: 6px; font-family: monospace;",
+            "Skip to main content"
+        }
+
         if show_fastswap() && current_tab() != Tab::FastSwap {
             div {
                 style: "position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 100; background: rgba(0,0,0,0.5); backdrop-filter: blur(4px);",
@@ -512,7 +674,9 @@ fn App() -> Element {
 
         PresentationPanel {}
 
-        IncomingTransferPopup { pending_transfers }
+        div { aria_live: "polite",
+            IncomingTransferPopup { pending_transfers }
+        }
 
         // Main layout with sidebar
         div { style: "width: 100vw; height: 100vh; display: flex; background: #050a14; color: #fff; font-family: 'Inter', sans-serif; position: relative; overflow: hidden;",
@@ -546,8 +710,8 @@ fn App() -> Element {
                     }
 
                     // Accent gradient glow in top-right
-                    div { style: format!("position: absolute; top: -200px; right: -200px; width: 500px; height: 500px; border-radius: 50%; background: radial-gradient(circle, rgba({}, 0.06), transparent 70%); pointer-events: none; z-index: 0; transition: all 0.5s;", accent_rgb) }
-                    div { style: format!("position: absolute; bottom: -150px; left: -150px; width: 400px; height: 400px; border-radius: 50%; background: radial-gradient(circle, rgba({}, 0.04), transparent 70%); pointer-events: none; z-index: 0; transition: all 0.5s;", accent_rgb) }
+                    div { style: format!("position: absolute; top: -200px; right: -200px; width: 500px; height: 500px; border-radius: 50%; background: radial-gradient(circle, rgba({}, 0.06), transparent 70%); pointer-events: none; z-index: 0; transition: color 0.3s ease, background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;", accent_rgb) }
+                    div { style: format!("position: absolute; bottom: -150px; left: -150px; width: 400px; height: 400px; border-radius: 50%; background: radial-gradient(circle, rgba({}, 0.04), transparent 70%); pointer-events: none; z-index: 0; transition: color 0.3s ease, background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;", accent_rgb) }
 
                     // Top bar
                     div { style: format!("position: relative; z-index: 10; display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; border-bottom: 1px solid rgba({}, 0.08); flex-shrink: 0; transition: border-color 0.5s; background: rgba(5,10,20,0.8); backdrop-filter: blur(8px);", accent_rgb),
@@ -556,14 +720,14 @@ fn App() -> Element {
                         div { style: format!("position: absolute; bottom: -1px; right: 0; width: 20px; height: 8px; border-right: 1px solid rgba({}, 0.2); border-bottom: 1px solid rgba({}, 0.2); transition: border-color 0.5s;", accent_rgb, accent_rgb) }
 
                         div { style: "display: flex; align-items: center; gap: 14px;",
-                            div { style: format!("font-size: 11px; font-weight: 700; letter-spacing: 2px; font-family: 'JetBrains Mono', monospace; color: {}; text-shadow: 0 0 20px {}; transition: all 0.5s;", primary_color, glow_color),
+                            div { style: format!("font-size: 11px; font-weight: 700; letter-spacing: 2px; font-family: 'JetBrains Mono', monospace; color: {}; text-shadow: 0 0 20px {}; transition: color 0.3s ease, background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;", primary_color, glow_color),
                                 "// {name}"
                             }
                             span { style: "font-size: 9px; color: rgba(255,255,255,0.12); font-family: monospace; letter-spacing: 0.5px;", "v1.0.0_eco" }
                             div {
                                 style: format!(
                                     "padding: 2px 10px; border-radius: 4px; font-size: 9px; letter-spacing: 1px; font-weight: 600; font-family: monospace; \
-                                     background: {}; border: 1px solid {}; color: {}; transition: all 0.5s;",
+                                     background: {}; border: 1px solid {}; color: {}; transition: color 0.3s ease, background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;",
                                     if awake { format!("rgba({}, 0.1)", accent_rgb) } else { "rgba(34,197,94,0.08)".to_string() },
                                     if awake { format!("rgba({}, 0.3)", accent_rgb) } else { "rgba(34,197,94,0.2)".to_string() },
                                     if awake { &primary_color } else { "#22c55e" },
@@ -595,7 +759,7 @@ fn App() -> Element {
                                             "position: absolute; inset: 0; border-radius: 50%; \
                                              background: radial-gradient(circle at 30% 28%, rgba(255,255,255,0.13) 0%, {} 25%, {} 60%, rgba(0,0,0,0.5) 100%); \
                                              box-shadow: 0 0 60px {}, 0 0 120px rgba({}, 0.15), inset 0 -30px 50px rgba(0,0,0,0.4); \
-                                             transition: all 0.5s; animation: float-3d 5s ease-in-out infinite; transform: rotateX(8deg) rotateY(12deg);",
+                                             transition: color 0.3s ease, background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease; animation: float-3d 5s ease-in-out infinite; transform: rotateX(8deg) rotateY(12deg);",
                                             primary_color, secondary_color, glow_color, accent_rgb
                                         )}
                                         // Tilted orbital ring for 3D depth
@@ -634,7 +798,7 @@ fn App() -> Element {
                                             "position: absolute; width: 70%; height: 70%; \
                                              background: radial-gradient(circle, {} 0%, rgba({}, 0.25) 40%, transparent 70%); \
                                              border-radius: 50%; filter: blur(25px); opacity: 0.35; \
-                                             animation: glow-breath 3s ease-in-out infinite; transition: all 0.5s;",
+                                             animation: glow-breath 3s ease-in-out infinite; transition: color 0.3s ease, background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;",
                                             primary_color, accent_rgb
                                         )}
                                         // AI name in center
@@ -729,6 +893,12 @@ fn App() -> Element {
                             },
                             Tab::Notifications => rsx! {
                                 NotificationPanel {
+                                    primary_color,
+                                    accent_rgb,
+                                }
+                            },
+                            Tab::Calls => rsx! {
+                                CallsPanel {
                                     primary_color,
                                     accent_rgb,
                                 }
