@@ -1,8 +1,7 @@
 // src/web_search.rs
-// Web search functionality with browser integration and result scraping
+// Web search functionality with browser integration
 
 use std::process::Command;
-use scraper::{Html, Selector};
 use serde::Deserialize;
 
 /// Supported search engines
@@ -243,21 +242,6 @@ pub async fn process_search_command(command: &str) -> Option<String> {
     // Detect search engine
     let engine = detect_search_engine(command);
     
-    // Check if user wants to just open browser or get answer
-    let should_read_results = cmd_lower.contains("what") 
-        || cmd_lower.contains("who") 
-        || cmd_lower.contains("where")
-        || cmd_lower.contains("when")
-        || cmd_lower.contains("why")
-        || cmd_lower.contains("how");
-    
-    if should_read_results {
-        if let Some(answer) = search_and_read_results(&query).await {
-            let _ = search_in_browser(&query, engine);
-            return Some(answer);
-        }
-    }
-    
     // Check if specific browser is mentioned
     let browsers = vec!["chrome", "firefox", "edge", "safari", "brave"];
     let mut specific_browser: Option<&str> = None;
@@ -293,134 +277,6 @@ pub fn is_search_command(command: &str) -> bool {
     ];
     
     search_keywords.iter().any(|keyword| cmd_lower.contains(keyword))
-}
-
-/// Fetch search results from Google and extract featured snippet
-fn async_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .expect("Failed to create HTTP client")
-}
-
-pub async fn fetch_search_results(query: &str) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
-    let encoded_query = urlencoding::encode(query);
-    let url = format!("https://www.google.com/search?q={}", encoded_query);
-    
-    let response = async_client().get(&url).send().await?;
-    let html_content = response.text().await?;
-    
-    parse_google_results(&html_content)
-}
-
-/// Parse Google search results HTML
-fn parse_google_results(html: &str) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
-    let document = Html::parse_document(html);
-    let mut results = Vec::new();
-    
-    // Try to extract featured snippet first (the highlighted answer box)
-    if let Some(featured) = extract_featured_snippet(&document) {
-        results.push(featured);
-    }
-    
-    // Extract regular search results
-    let result_selector = Selector::parse("div.g").unwrap_or_else(|_| {
-        Selector::parse("div").unwrap()
-    });
-    
-    let title_selector = Selector::parse("h3").unwrap();
-    let snippet_selector = Selector::parse("div[data-sncf], div.VwiC3b, span.aCOpRe").unwrap();
-    let link_selector = Selector::parse("a").unwrap();
-    
-    for element in document.select(&result_selector).take(5) {
-        let title = element
-            .select(&title_selector)
-            .next()
-            .map(|e| e.text().collect::<String>())
-            .unwrap_or_default();
-        
-        let snippet = element
-            .select(&snippet_selector)
-            .next()
-            .map(|e| e.text().collect::<String>())
-            .unwrap_or_default();
-        
-        let url = element
-            .select(&link_selector)
-            .next()
-            .and_then(|e| e.value().attr("href"))
-            .unwrap_or_default()
-            .to_string();
-        
-        if !title.is_empty() && !snippet.is_empty() {
-            results.push(SearchResult {
-                title: title.trim().to_string(),
-                snippet: snippet.trim().to_string(),
-                url: url.trim().to_string(),
-            });
-        }
-    }
-    
-    Ok(results)
-}
-
-/// Extract featured snippet (highlighted answer box)
-fn extract_featured_snippet(document: &Html) -> Option<SearchResult> {
-    // Google featured snippet selectors
-    let selectors = vec![
-        "div.kp-blk div.kno-rdesc span",  // Knowledge panel
-        "div.IZ6rdc",                      // Featured snippet
-        "div.hgKElc",                      // Answer box
-        "div.kp-header div.kno-rdesc",    // Knowledge graph
-        "div[data-attrid='description'] span", // Description
-    ];
-    
-    for selector_str in selectors {
-        if let Ok(selector) = Selector::parse(selector_str) {
-            if let Some(element) = document.select(&selector).next() {
-                let text = element.text().collect::<String>();
-                if !text.trim().is_empty() && text.len() > 20 {
-                    return Some(SearchResult {
-                        title: "Featured Answer".to_string(),
-                        snippet: text.trim().to_string(),
-                        url: String::new(),
-                    });
-                }
-            }
-        }
-    }
-    
-    None
-}
-
-/// Search and read results aloud
-pub async fn search_and_read_results(query: &str) -> Option<String> {
-    // Fetch search results
-    match fetch_search_results(query).await {
-        Ok(results) => {
-            if results.is_empty() {
-                return Some("I couldn't find any results for that query.".to_string());
-            }
-            
-            // Get the first result (usually featured snippet or top result)
-            let top_result = &results[0];
-            
-            // Limit snippet to reasonable length for TTS
-            let snippet = if top_result.snippet.len() > 300 {
-                format!("{}...", &top_result.snippet[..300])
-            } else {
-                top_result.snippet.clone()
-            };
-            
-            // Return the answer
-            Some(format!("Here's what I found: {}", snippet))
-        }
-        Err(e) => {
-            eprintln!("Search error: {}", e);
-            Some("I had trouble fetching the search results. Opening browser instead.".to_string())
-        }
-    }
 }
 
 // ─── Weather API (wttr.in) ─────────────────────────────────────────────

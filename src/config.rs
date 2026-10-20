@@ -9,13 +9,43 @@ use std::sync::{Arc, RwLock};
 /// Configuration file path
 const CONFIG_PATH: &str = "./pkg/config.json";
 
-// Assistant personality presets â€” the enum (and persona texts) live in the
-// igris-ai crate's host bridge; re-exported here so every existing
-// `config::Personality` path keeps working.
-pub use igris_ai::bridge::Personality;
+// Assistant personality presets — defined locally now that AI lives in igris-ai.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Personality {
+    Igris,
+    Alita,
+}
 
-// Custom serialization to handle simple string format in config lives with
-// the moved enum (igris_ai::bridge::Personality).
+impl Personality {
+    pub fn name(&self) -> &str {
+        match self {
+            Personality::Igris => "IGRIS",
+            Personality::Alita => "Alita",
+        }
+    }
+
+    pub fn speaker_id(&self) -> &str {
+        "p234"
+    }
+
+    pub fn wake_word(&self) -> &str {
+        "hello"
+    }
+
+    pub fn greeting(&self) -> &str {
+        "Hello! I'm IGRIS."
+    }
+
+    pub fn invoke_response(&self) -> &str {
+        "Yes?"
+    }
+}
+
+impl Default for Personality {
+    fn default() -> Self {
+        Personality::Igris
+    }
+}
 
 /// Voice recognition settings
 #[derive(Debug, Clone, Serialize, Deserialize)]

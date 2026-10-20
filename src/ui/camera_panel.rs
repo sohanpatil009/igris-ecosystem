@@ -4,7 +4,7 @@
 use dioxus::prelude::*;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
-use crate::media::{CAMERA_STATE, open_camera, close_camera, take_photo, start_recording, stop_recording};
+use crate::media::{CAMERA_STATE, close_camera, take_photo, start_recording, stop_recording};
 
 /// Camera panel component
 #[component]

@@ -39,27 +39,24 @@ pub fn is_presentation_open() -> bool {
     PRESENTATION_OPEN.load(Ordering::SeqCst)
 }
 
-/// Narrate all slides with TTS
+/// Advance through all slides (TTS narration lives in the separate AI crate;
+/// narration text is logged while slides advance on screen).
 fn narrate_presentation() {
-    use crate::core::tts::speak;
-    
     for (i, slide) in SLIDES.iter().enumerate() {
         if !IS_PLAYING.load(Ordering::SeqCst) {
             break;
         }
-        
+
         // Update current slide
         CURRENT_SLIDE.store(i, Ordering::SeqCst);
-        
-        // Speak narration
-        if let Err(e) = speak(slide.narration) {
-            eprintln!("[PRESENTATION] TTS error: {}", e);
-        }
-        
+
+        // Log narration text
+        println!("[PRESENTATION] {}", slide.narration);
+
         // Pause between slides
         std::thread::sleep(std::time::Duration::from_millis(1000));
     }
-    
+
     IS_PLAYING.store(false, Ordering::SeqCst);
 }
 

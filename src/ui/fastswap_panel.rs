@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 use rfd::FileDialog;
-use crate::fastswap::{Device, FileProgress, ProgressStatus, TransferProgress, PendingTransfer};
+use crate::fastswap::{Device, ProgressStatus, TransferProgress, PendingTransfer};
 use std::path::PathBuf;
 
 #[component]

@@ -1,16 +1,14 @@
 // src/commands/system.rs
-// High-level system control interface with NER integration
+// High-level system control interface
 
-use crate::nlu::ner::GLOBAL_NER;
 use crate::platform::get_system_controller;
 #[cfg(target_os = "windows")]
 use crate::platform::ecosystem::PlatformClipboard;
 
-/// Process system control commands with NER
+/// Process system control commands
 pub fn process_system_command(command: &str) -> Option<String> {
     let cmd_lower = command.to_lowercase();
     let controller = get_system_controller();
-    let _entities = GLOBAL_NER.extract_entities(&cmd_lower);
     
     // Shutdown commands
     if cmd_lower.contains("shutdown") || cmd_lower.contains("shut down") || cmd_lower.contains("power off") {
@@ -74,12 +72,12 @@ pub fn process_system_command(command: &str) -> Option<String> {
     None
 }
 
-/// Handle volume-related commands with NER
+/// Handle volume-related commands
 fn handle_volume_command(command: &str, controller: &Box<dyn crate::platform::SystemController>) -> Option<String> {
     println!("[SYSTEM CMD] Processing volume command: {}", command);
     
-    // Extract percentage using NER
-    let percentage = GLOBAL_NER.parse_percentage(command);
+    // Extract percentage using simple regex
+    let percentage = parse_percentage_simple(command);
     println!("[SYSTEM CMD] Extracted percentage: {:?}", percentage);
     
     // Set volume to specific level
@@ -117,12 +115,12 @@ fn handle_volume_command(command: &str, controller: &Box<dyn crate::platform::Sy
     None
 }
 
-/// Handle brightness-related commands with NER
+/// Handle brightness-related commands
 fn handle_brightness_command(command: &str, controller: &Box<dyn crate::platform::SystemController>) -> Option<String> {
     println!("[SYSTEM CMD] Processing brightness command: {}", command);
     
-    // Extract percentage using NER
-    let percentage = GLOBAL_NER.parse_percentage(command);
+    // Extract percentage using simple regex
+    let percentage = parse_percentage_simple(command);
     println!("[SYSTEM CMD] Extracted percentage: {:?}", percentage);
     
     // Set brightness to specific level
@@ -580,22 +578,24 @@ pub fn close_current_window() -> String {
     }
     #[cfg(target_os = "windows")]
     {
-        let ps_script =
-            r#"Add-Type @"
-  using System;
-  using System.Runtime.InteropServices;
-  using System.Diagnostics;
-  public class Foreground {
+        // Use WM_CLOSE via PowerShell's Win32 interop instead of killing the process
+        let ps_script = r#"
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class WinClose {
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")]
-    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
-  }
+    public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    const uint WM_CLOSE = 0x0010;
+    public static void CloseForeground() {
+        IntPtr hwnd = GetForegroundWindow();
+        if (hwnd != IntPtr.Zero) PostMessage(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+    }
+}
 "@
-$hwnd = [Foreground]::GetForegroundWindow()
-$pid = 0
-[Foreground]::GetWindowThreadProcessId($hwnd, [ref]$pid) | Out-Null
-Stop-Process -Id $pid -Force"#;
+[WinClose]::CloseForeground()"#;
         match std::process::Command::new("powershell")
             .args(["-Command", ps_script])
             .output()
@@ -608,6 +608,15 @@ Stop-Process -Id $pid -Force"#;
     {
         "Closing the current window is not supported on this platform.".to_string()
     }
+}
+
+/// Simple percentage parser: extracts a number followed by optional '%'
+fn parse_percentage_simple(text: &str) -> Option<u8> {
+    let re = regex::Regex::new(r"(\d+)\s*%?").ok()?;
+    re.captures(text)
+        .and_then(|caps| caps.get(1))
+        .and_then(|m| m.as_str().parse::<u8>().ok())
+        .filter(|v| *v <= 100)
 }
 
 /// Check if command is a system control command

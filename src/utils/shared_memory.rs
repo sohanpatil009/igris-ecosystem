@@ -3,7 +3,7 @@
 
 use crate::platform::process_builder::ProcessBuilderExt;
 use once_cell::sync::Lazy;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, RwLock};
@@ -463,12 +463,12 @@ impl SharedMemory {
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Synthesize speech with caching
-    pub async fn speak(&self, text: &str, output_path: &str, speaker_id: &str) -> Result<TtsResponse, String> {
+    pub async fn speak(&self, text: &str, _output_path: &str, speaker_id: &str) -> Result<TtsResponse, String> {
         self.speak_internal(text, speaker_id, Priority::Normal).await
     }
 
     /// Synthesize speech with high priority (for immediate responses)
-    pub async fn speak_urgent(&self, text: &str, output_path: &str, speaker_id: &str) -> Result<TtsResponse, String> {
+    pub async fn speak_urgent(&self, text: &str, _output_path: &str, speaker_id: &str) -> Result<TtsResponse, String> {
         self.speak_internal(text, speaker_id, Priority::High).await
     }
 

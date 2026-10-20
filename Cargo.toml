@@ -34,25 +34,21 @@ mime_guess = "2.0"
 rand = "0.8"
 lazy_static = "1.4"
 
-# Voice assistant / GUI
+# GUI
 dioxus = { version = "0.7", features = ["desktop"] }
 dioxus-desktop = "0.7"
-igris-ai = { path = "../igris-ai" }
 igris-protocol = { path = "../igris-protocol" }
+
+# Mesh desktop engine: LAN call audio + notification ringtone + app launching
+cpal = "0.16"
+rodio = "0.17"
+fuzzy-matcher = "0.3"
 regex = "1.10"
 urlencoding = "2.1"
 image = { version = "0.24", features = ["jpeg", "png"] }
 num_cpus = "1.16"
-indicatif = "0.17"
-console = { version = "0.16", features = ["std"] }
-zip = "0.6"
 rfd = "0.15"
 async-std = "1.12"
-fuzzy-matcher = "0.3"
-scraper = "0.20"
-dotenv = "0.15"
-cpal = "0.16"
-rodio = "0.17"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["processthreadsapi", "winnt", "winuser", "winsock2", "ws2def", "handleapi", "processenv", "fileapi", "winbase"] }
@@ -87,7 +83,3 @@ path = "src/lib.rs"
 name = "igrisecosystem"
 path = "src/main.rs"
 
-[features]
-default = []
-# Forwarded to igris-ai: NVIDIA Riva online STT client generation.
-with_riva = ["igris-ai/with_riva"]

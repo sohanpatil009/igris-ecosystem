@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::{Command, Child, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
 
 /// Camera state
 #[derive(Clone)]

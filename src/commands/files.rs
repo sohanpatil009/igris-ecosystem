@@ -1,7 +1,12 @@
 // src/commands/files.rs - Cross-platform file operations with async multi-threaded search
 use crate::platform_utils::get_file_system;
-use crate::core::tts::speak_compat as speak;
 use crate::{SEARCH_STATE, SearchResultData};
+
+/// Speak shim — the AI/TTS engine was removed; log the message instead.
+fn speak(msg: &str) -> Result<(), Box<dyn Error>> {
+    println!("[IGRIS] {}", msg);
+    Ok(())
+}
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -183,7 +188,8 @@ pub async fn async_file_search(
     Ok(all_results)
 }
 
-/// Legacy sync version for compatibility (calls async version)
+/// Sync wrapper — only call from non-async contexts. Panics if called within a tokio runtime.
+/// Prefer `async_file_search` directly when in async context.
 pub fn multi_threaded_file_search(
     query: &str,
     extension: Option<&str>,
@@ -308,7 +314,8 @@ pub async fn async_folder_search(
     Ok(all_results)
 }
 
-/// Legacy sync version for compatibility (calls async version)
+/// Sync wrapper — only call from non-async contexts. Panics if called within a tokio runtime.
+/// Prefer `async_folder_search` directly when in async context.
 pub fn multi_threaded_folder_search(
     query: &str,
     max_results: usize,
@@ -1035,7 +1042,7 @@ pub async fn process_file_command_async(text: &str) -> Option<String> {
                     }
                 } else {
                     // Try extracting filename and content from the rest
-                    let words: Vec<&str> = after.split_whitespace().collect();
+                    let _words: Vec<&str> = after.split_whitespace().collect();
                     if let Some((name, ext)) = extract_file_info(text) {
                         let file_path = format!("{}.{}", name, ext);
                         // Rest of the text after the filename is the content

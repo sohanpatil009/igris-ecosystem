@@ -3,8 +3,6 @@ use super::theme::Theme;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tab {
-    Dashboard,
-    Chat,
     FastSwap,
     Devices,
     Notifications,
@@ -17,14 +15,11 @@ pub enum Tab {
 #[component]
 pub fn Sidebar(
     active_tab: Signal<Tab>,
-    is_awake: bool,
     primary_color: String,
     accent_rgb: String,
 ) -> Element {
     let tabs = [
         (Tab::Devices, "NODE", "Devices"),
-        (Tab::Dashboard, "CORE", "Dashboard"),
-        (Tab::Chat, "CHAT", "Chat"),
         (Tab::FastSwap, "XFER", "File Share"),
         (Tab::Notifications, "NOTIF", "Notifications"),
         (Tab::Calls, "CALL", "Calls"),
@@ -102,12 +97,11 @@ pub fn Sidebar(
                         style: format!(
                             "width: 6px; height: 6px; border-radius: 50%; background: {}; \
                              box-shadow: 0 0 10px {}; animation: igris-pulse-dot 2s ease-in-out infinite; transition: background-color 0.3s ease;",
-                            if is_awake { &primary_color } else { Theme::TRUST },
-                            if is_awake { &primary_color } else { Theme::TRUST },
+                            &primary_color,
+                            &primary_color,
                         ),
                     },
-                    "STATUS: "
-                    if is_awake { "LISTENING" } else { "STANDBY" }
+                    "STATUS: MESH ACTIVE"
                 }
             }
         }

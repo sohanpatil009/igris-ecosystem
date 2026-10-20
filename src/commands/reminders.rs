@@ -7,7 +7,6 @@ use chrono::{DateTime, Local, Duration, Timelike};
 use once_cell::sync::Lazy;
 use std::thread;
 use std::time::Duration as StdDuration;
-use crate::nlu::ner::GLOBAL_NER;
 
 #[derive(Debug, Clone)]
 pub struct Alarm {
@@ -115,10 +114,10 @@ impl ReminderManager {
         for (id, alarm) in alarms.iter() {
             if alarm.active && now >= alarm.time {
                 println!("[REMINDER] 🔔 ALARM TRIGGERED: {}", alarm.message);
-                
-                // Trigger TTS
+
+                // Notify (TTS lives in the separate AI crate — log instead)
                 let msg = format!("Alarm! {}", alarm.message);
-                let _ = crate::core::tts::speak(&msg);
+                println!("[IGRIS] {}", msg);
                 
                 to_remove.push(*id);
             }
@@ -136,10 +135,10 @@ impl ReminderManager {
         for (id, reminder) in reminders.iter() {
             if reminder.active && now >= reminder.trigger_time {
                 println!("[REMINDER] 📌 REMINDER TRIGGERED: {}", reminder.message);
-                
-                // Trigger TTS
+
+                // Notify (TTS lives in the separate AI crate — log instead)
                 let msg = format!("Reminder: {}", reminder.message);
-                let _ = crate::core::tts::speak(&msg);
+                println!("[IGRIS] {}", msg);
                 
                 to_remove.push(*id);
             }
@@ -224,8 +223,24 @@ fn parse_time(command: &str) -> Option<DateTime<Local>> {
 
 /// Parse duration from command (e.g., "in 30 minutes", "in 2 hours")
 fn parse_duration(command: &str) -> Option<DateTime<Local>> {
-    let duration_secs = GLOBAL_NER.parse_duration_seconds(command)?;
+    let duration_secs = parse_duration_seconds(command)?;
     Some(Local::now() + Duration::seconds(duration_secs as i64))
+}
+
+/// Simple duration parser: "in 30 minutes", "in 2 hours", "in 10 seconds"
+fn parse_duration_seconds(command: &str) -> Option<u32> {
+    let re = regex::Regex::new(r"(\d+)\s*(second|sec|minute|min|hour|hr|day)s?").ok()?;
+    let command_lower = command.to_lowercase();
+    let caps = re.captures(&command_lower)?;
+    let value: u32 = caps.get(1)?.as_str().parse().ok()?;
+    let multiplier = match caps.get(2)?.as_str() {
+        "second" | "sec" => 1,
+        "minute" | "min" => 60,
+        "hour" | "hr" => 3600,
+        "day" => 86400,
+        _ => return None,
+    };
+    Some(value * multiplier)
 }
 
 /// Handle alarm commands
@@ -234,7 +249,7 @@ pub fn handle_alarm_command(action: &str, command: &str) -> Result<String, Strin
         "alarm_set" => {
             if let Some(time) = parse_time(command) {
                 let message = "Time to wake up!".to_string();
-                let id = REMINDER_MANAGER.add_alarm(time, message);
+                let _id = REMINDER_MANAGER.add_alarm(time, message);
                 Ok(format!("Alarm set for {}", time.format("%I:%M %p")))
             } else {
                 Err("Could not understand the time. Try 'set alarm for 7 am'".to_string())
@@ -281,7 +296,7 @@ pub fn handle_reminder_command(action: &str, command: &str) -> Result<String, St
                     "Reminder".to_string()
                 };
                 
-                let id = REMINDER_MANAGER.add_reminder(trigger_time, message.clone());
+                let _id = REMINDER_MANAGER.add_reminder(trigger_time, message.clone());
                 let duration_str = if trigger_time.signed_duration_since(Local::now()).num_minutes() < 60 {
                     format!("{} minutes", trigger_time.signed_duration_since(Local::now()).num_minutes())
                 } else {
@@ -299,7 +314,7 @@ pub fn handle_reminder_command(action: &str, command: &str) -> Result<String, St
                     "Reminder".to_string()
                 };
                 
-                let id = REMINDER_MANAGER.add_reminder(trigger_time, message.clone());
+                let _id = REMINDER_MANAGER.add_reminder(trigger_time, message.clone());
                 Ok(format!("Reminder set for {}", trigger_time.format("%I:%M %p")))
             } else {
                 Err("Could not understand the time. Try 'remind me in 30 minutes' or 'remind me at 5 pm'".to_string())

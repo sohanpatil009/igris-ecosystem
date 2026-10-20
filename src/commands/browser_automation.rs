@@ -1,7 +1,5 @@
 use std::process::Command;
 
-use crate::core::tts::speak_compat as speak;
-
 /// A known site entry: (keyword, display_name, url_template)
 /// url_template uses {} for the encoded query.
 struct SiteEntry(&'static str, &'static str, &'static str);
@@ -189,7 +187,7 @@ pub async fn handle_site_search_command(text: &str) -> Option<String> {
     let url = url_template.replace("{}", &encoded);
 
     let msg = format!("Searching {} for {}", display_name, query);
-    let _ = speak(&msg);
+    println!("[SEARCH] {}", msg);
 
     open_search_url(&url);
 
@@ -224,6 +222,12 @@ fn open_search_url(url: &str) {
 pub fn type_into_browser(text: &str) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
+        // Sanitize: escape backslashes, quotes, and prevent AppleScript injection
+        let safe_text = text
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', " ")
+            .replace('\r', "");
         let script = format!(
             r#"tell application "System Events"
                 set frontApp to name of first process whose frontmost is true
@@ -236,7 +240,7 @@ pub fn type_into_browser(text: &str) -> Result<String, String> {
                 keystroke "{}"
             end tell
             return "Typed into " & frontApp"#,
-            text.replace("\"", "\\\"")
+            safe_text
         );
         match run_applescript(&script) {
             Ok(msg) => Ok(format!("Typed '{}' into browser", text)),
@@ -356,7 +360,7 @@ pub fn switch_previous_window() -> String {
 
 /// Send a keystroke to the focused application using AppleScript (macOS) or xdotool (Linux).
 /// Falls back gracefully on unsupported platforms.
-fn send_keystroke(keys: &[&str]) -> String {
+fn send_keystroke(_keys: &[&str]) -> String {
     #[cfg(target_os = "macos")]
     {
         let modifiers: Vec<&str> = keys.iter()

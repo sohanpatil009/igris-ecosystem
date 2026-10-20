@@ -106,7 +106,7 @@ impl AppLauncher for WindowsAppLauncher {
                 procs.remove(&display_name);
                 Ok(format!("Closed {}", display_name))
             }
-            Err(e) => Err(format!("I couldn't close {}. It might not be running.", display_name).into()),
+            Err(_e) => Err(format!("I couldn't close {}. It might not be running.", display_name).into()),
         }
     }
     
